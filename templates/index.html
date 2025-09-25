@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mayk - Monitor Binance</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        :root {
+            --volume-color: #ff9800;
+            --rsi-color: #2196F3;
+            --ema-color: #4CAF50;
+            --macd-color: #9c27b0;
+            --bg-dark: #1a1a1a;
+            --bg-container: #2d2d2d;
+            --bg-input: #3d3d3d;
+        }
+        
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: var(--bg-dark);
+            color: #ffffff;
+        }
+        .container {
+            background-color: var(--bg-container);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .controls {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        select, input, button {
+            padding: 8px 12px;
+            border: none;
+            border-radius: 5px;
+            background-color: var(--bg-input);
+            color: #ffffff;
+        }
+        button {
+            cursor: pointer;
+            transition: opacity 0.3s;
+        }
+        button:hover {
+            opacity: 0.9;
+        }
+        .btn-start {
+            background-color: #4CAF50;
+        }
+        .btn-stop {
+            background-color: #f44336;
+        }
+        .btn-filter {
+            background-color: #9c27b0;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: bold;
+        }
+        .status.monitoring {
+            background-color: #2e7d32;
+        }
+        .status.stopped {
+            background-color: #d32f2f;
+        }
+        .alerts {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .alert {
+            padding: 12px;
+            margin-bottom: 8px;
+            border-radius: 5px;
+            border: 3px solid transparent;
+            position: relative;
+            transition: all 0.3s ease;
+        }
+        
+        /* Animações de moldura intermitente */
+        @keyframes volumePulse {
+            0%, 100% { 
+                border-color: transparent; 
+                box-shadow: none; 
+            }
+            25% { 
+                border-color: var(--volume-color); 
+                box-shadow: 0 0 15px var(--volume-color); 
+            }
+            50% { 
+                border-color: transparent; 
+                box-shadow: none; 
+            }
+            75% { 
+                border-color: var(--volume-color); 
+                box-shadow: 0 0 20px var(--volume-color); 
+            }
+        }
+        
+        @keyframes rsiPulse {
+            0%, 100% { 
+                border-color: transparent; 
+                box-shadow: none; 
+            }
+            25% { 
+                border-color: var(--rsi-color); 
+                box-shadow: 0 0 15px var(--rsi-color); 
+            }
+            50% { 
+                border-color: transparent; 
+                box-shadow: none; 
+            }
+            75% { 
+                border-color: var(--rsi-color); 
+                box-shadow: 0 0 20px var(--rsi-color); 
+            }
+        }
+        
+        @keyframes emaPulse {
+            0%, 100% { 
+                border-color: transparent; 
+                box-shadow: none; 
+            }
+            25% { 
+                border-color: var(--ema-color); 
+                box-shadow: 0 0 15px var(--ema-color); 
+            }
+            50% { 
+                border-color: transparent; 
+                box-shadow: none; 
+            }
+            75% { 
+                border-color: var(--ema-color); 
+                box-shadow: 0 0 20px var(--ema-color); 
+            }
+        }
+        
+        @keyframes macdPulse {
+            0%, 100% { 
+                border-color: transparent; 
+                box-shadow: none; 
+            }
+            25% { 
+                border-color: var(--macd-color); 
+                box-shadow: 0 0 15px var(--macd-color); 
+            }
+            50% { 
+                border-color: transparent; 
+                box-shadow: none; 
+            }
+            75% { 
+                border-color: var(--macd-color); 
+                box-shadow: 0 0 20px var(--macd-color); 
+            }
+        }
+        
+        /* Classes para alertas com animação */
+        .alert.volume.pulsing {
+            animation: volumePulse 2s ease-in-out infinite;
+            background-color: rgba(255, 152, 0, 0.2);
+        }
+        
+        .alert.rsi.pulsing {
+            animation: rsiPulse 2s ease-in-out infinite;
+            background-color: rgba(33, 150, 243, 0.2);
+        }
+        
+        .alert.ema.pulsing {
+            animation: emaPulse 2s ease-in-out infinite;
+            background-color: rgba(76, 175, 80, 0.2);
+        }
+        
+        .alert.macd.pulsing {
+            animation: macdPulse 2s ease-in-out infinite;
+            background-color: rgba(156, 39, 176, 0.2);
+        }
+        
+        /* Estilos base dos alertas (sem animação) */
+        .alert.volume:not(.pulsing) {
+            background-color: rgba(255, 152, 0, 0.2);
+            border-left: 5px solid var(--volume-color);
+            color: #ffd54f;
+        }
+        .alert.rsi:not(.pulsing) {
+            background-color: rgba(33, 150, 243, 0.2);
+            border-left: 5px solid var(--rsi-color);
+            color: #64b5f6;
+        }
+        .alert.ema:not(.pulsing) {
+            background-color: rgba(76, 175, 80, 0.2);
+            border-left: 5px solid var(--ema-color);
+            color: #81c784;
+        }
+        .alert.macd:not(.pulsing) {
+            background-color: rgba(156, 39, 176, 0.2);
+            border-left: 5px solid var(--macd-color);
+            color: #ba68c8;
+        }
+        
+        .alert-header {
+            font-weight: bold;
+            font-size: 1.1em;
+            margin-bottom: 5px;
+        }
+        .alert-details {
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+        .filters {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+        .filter-btn {
+            padding: 6px 12px;
+            border-radius: 20px;
+            cursor: pointer;
+            opacity: 0.7;
+            transition: all 0.3s;
+        }
+        .filter-btn.active {
+            opacity: 1;
+            transform: scale(1.05);
+        }
+        .filter-volume {
+            background-color: var(--volume-color);
+        }
+        .filter-rsi {
+            background-color: var(--rsi-color);
+        }
+        .filter-ema {
+            background-color: var(--ema-color);
+        }
+        .filter-macd {
+            background-color: var(--macd-color);
+        }
+        .stats {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+        .stat-box {
+            padding: 10px;
+            border-radius: 5px;
+            text-align: center;
+            flex: 1;
+        }
+        .stat-volume {
+            background-color: rgba(255, 152, 0, 0.3);
+        }
+        .stat-rsi {
+            background-color: rgba(33, 150, 243, 0.3);
+        }
+        .stat-ema {
+            background-color: rgba(76, 175, 80, 0.3);
+        }
+        .stat-macd {
+            background-color: rgba(156, 39, 176, 0.3);
+        }
+        .stat-count {
+            font-size: 1.5em;
+            font-weight: bold;
+        }
+        .system-message {
+            background-color: #757575;
+            color: white;
+            padding: 8px;
+            margin-bottom: 5px;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+        .ema-config {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        /* Efeito de entrada para novos alertas */
+        .alert.new-alert {
+            transform: scale(1.02);
+        }
+        
+        @media (max-width: 768px) {
+            .controls {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1>🐋 Mayk - BINANCE</h1>
+    
+    <div class="container">
+        <form id="monitoringForm">
+            <div class="controls">
+                <label>Timeframe:</label>
+                <select id="timeframe" name="timeframe">
+                    {% for tf in timeframes %}
+                    <option value="{{ tf }}" {% if tf == '5m' %}selected{% endif %}>{{ tf }}</option>
+                    {% endfor %}
+                </select>
+                
+                <label>Múltiplo:</label>
+                <input type="number" id="multiple" name="multiple" value="3" min="1" max="50" step="0.1">
+                
+                <div class="ema-config">
+                    <label>EMA:</label>
+                    <select id="ema_type" name="ema_type">
+                        {% for ema_key, ema_config in ema_configs.items() %}
+                        <option value="{{ ema_key }}">{{ ema_config.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                
+                <button type="submit" class="btn-start">Iniciar Monitoramento</button>
+                <button type="button" onclick="stopMonitoring()" class="btn-stop">Parar</button>
+            </div>
+        </form>
+        
+        <div id="status" class="status stopped">
+            Status: Parado
+        </div>
+    </div>
+    
+    <div class="container">
+        <h2>Estatísticas</h2>
+        <div class="stats">
+            <div class="stat-box stat-volume">
+                <div class="stat-count" id="volume-count">0</div>
+                <div>Alertas de Volume</div>
+                <div>DETECTOR DE BALEIAS</div>
+            </div>
+            <div class="stat-box stat-rsi">
+                <div class="stat-count" id="rsi-count">0</div>
+                <div>Alertas de RSI</div>
+                <div>PREÇOS MUITO BAIXO</div>
+            </div>
+            <div class="stat-box stat-ema">
+                <div class="stat-count" id="ema-count">0</div>
+                <div>Alertas de EMA</div>
+            </div>
+            <div class="stat-box stat-macd">
+                <div class="stat-count" id="macd-count">0</div>
+                <div>Alertas de MACD</div>
+            </div>
+        </div>
+        
+        <h2>Filtros de Alertas</h2>
+        <div class="filters">
+            <div class="filter-btn filter-volume active" data-type="volume" onclick="toggleFilter('volume')">Volume</div>
+            <div class="filter-btn filter-rsi active" data-type="rsi" onclick="toggleFilter('rsi')">RSI</div>
+            <div class="filter-btn filter-ema active" data-type="ema" onclick="toggleFilter('ema')">EMA</div>
+            <div class="filter-btn filter-macd active" data-type="macd" onclick="toggleFilter('macd')">MACD</div>
+            <button class="btn-filter" onclick="clearAlerts()">Limpar Alertas</button>
+        </div>
+        
+        <h2>Alertas 🚨</h2>
+        <div id="alerts" class="alerts">
+            <p>Aguardando alertas...</p>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let alertCount = {
+            volume: 0,
+            rsi: 0,
+            ema: 0,
+            macd: 0
+        };
+        let activeFilters = {
+            volume: true,
+            rsi: true,
+            ema: true,
+            macd: true
+        };
+        
+        // Elementos DOM
+        const statusDiv = document.getElementById('status');
+        const alertsDiv = document.getElementById('alerts');
+        const form = document.getElementById('monitoringForm');
+        const volumeCount = document.getElementById('volume-count');
+        const rsiCount = document.getElementById('rsi-count');
+        const emaCount = document.getElementById('ema-count');
+        const macdCount = document.getElementById('macd-count');
+        
+        // Conexão WebSocket
+        socket.on('connect', function() {
+            console.log('Conectado ao servidor');
+            addSystemMessage('Conectado ao servidor ✅');
+        });
+        
+        socket.on('disconnect', function() {
+            console.log('Desconectado do servidor');
+            addSystemMessage('Desconectado do servidor ❌');
+        });
+        
+        socket.on('monitoring_started', function(data) {
+            let statusText = `Status: Monitorando (${data.timeframe}, ${data.multiple}x)`;
+            if (data.ema_name) {
+                statusText += `, ${data.ema_name}`;
+            }
+            statusDiv.textContent = statusText;
+            statusDiv.className = 'status monitoring';
+            addSystemMessage(`Monitoramento iniciado: ${data.timeframe}, múltiplo ${data.multiple}x${data.ema_name ? ', ' + data.ema_name : ''}`);
+        });
+        
+        socket.on('monitoring_stopped', function(data) {
+            statusDiv.textContent = 'Status: Parado';
+            statusDiv.className = 'status stopped';
+            addSystemMessage('Monitoramento parado');
+        });
+        
+        socket.on('whale_alert', function(alert) {
+            alertCount.volume++;
+            volumeCount.textContent = alertCount.volume;
+            
+            const alertElement = createAlertElement('volume', alert, 
+                `🐋 ${alert.crypto} - ${alert.multiple}x BALEIA DETECTADA!`,
+                `Volume atual: ${formatNumber(alert.volume)} | Média (20): ${formatNumber(alert.avg_volume)} | Timeframe: ${alert.timeframe} | ${alert.timestamp}`
+            );
+            
+            addAlertToDOM(alertElement);
+            
+            // Notificação do navegador
+            if (Notification.permission === 'granted') {
+                new Notification(`Whale Alert: ${alert.crypto}`, {
+                    body: `${alert.multiple}x volume detectado!`,
+                    icon: '/favicon.ico'
+                });
+            }
+        });
+        
+        socket.on('indicator_alert', function(alert) {
+            if (alert.type === 'RSI') {
+                alertCount.rsi++;
+                rsiCount.textContent = alertCount.rsi;
+                
+                const alertElement = createAlertElement('rsi', alert,
+                    `📈 ${alert.crypto} - RSI ${alert.current_rsi}`,
+                    `RSI anterior: ${alert.previous_rsi} | Cruzou de baixo para cima | Timeframe: ${alert.timeframe} | ${alert.timestamp}`
+                );
+                
+                addAlertToDOM(alertElement);
+                
+                if (Notification.permission === 'granted') {
+                    new Notification(`RSI Alert: ${alert.crypto}`, {
+                        body: `RSI ${alert.current_rsi} - Sinal de compra`,
+                        icon: '/favicon.ico'
+                    });
+                }
+            } else if (alert.type === 'EMA') {
+                alertCount.ema++;
+                emaCount.textContent = alertCount.ema;
+                
+                const emaConfig = alert.ema_name || 'EMA Crossover';
+                const alertElement = createAlertElement('ema', alert,
+                    `📊 ${alert.crypto} - ${emaConfig}`,
+                    `EMA Rápida: ${alert.current_ema_fast} > EMA Lenta: ${alert.current_ema_slow} | Timeframe: ${alert.timeframe} | ${alert.timestamp}`
+                );
+                
+                addAlertToDOM(alertElement);
+                
+                if (Notification.permission === 'granted') {
+                    new Notification(`EMA Alert: ${alert.crypto}`, {
+                        body: `${emaConfig} - EMA rápida cruzou EMA lenta de baixo para cima`,
+                        icon: '/favicon.ico'
+                    });
+                }
+            } else if (alert.type === 'MACD') {
+                alertCount.macd++;
+                macdCount.textContent = alertCount.macd;
+                
+                const alertElement = createAlertElement('macd', alert,
+                    `📈 ${alert.crypto} - MACD Crossover`,
+                    `MACD: ${alert.current_macd} > Signal: ${alert.current_signal} | Cruzamento bullish | Timeframe: ${alert.timeframe} | ${alert.timestamp}`
+                );
+                
+                addAlertToDOM(alertElement);
+                
+                if (Notification.permission === 'granted') {
+                    new Notification(`MACD Alert: ${alert.crypto}`, {
+                        body: `MACD cruzou linha de sinal - Sinal de compra`,
+                        icon: '/favicon.ico'
+                    });
+                }
+            }
+        });
+        
+        // Funções auxiliares
+        function formatNumber(num) {
+            if (num >= 1000000) {
+                return (num / 1000000).toFixed(2) + 'M';
+            } else if (num >= 1000) {
+                return (num / 1000).toFixed(2) + 'K';
+            }
+            return num.toFixed(2);
+        }
+        
+        function createAlertElement(type, alert, header, details) {
+            const alertElement = document.createElement('div');
+            alertElement.className = `alert ${type} pulsing new-alert`;
+            alertElement.dataset.type = type;
+            alertElement.innerHTML = `
+                <div class="alert-header">${header}</div>
+                <div class="alert-details">${details}</div>
+            `;
+            
+            // Aplicar filtro
+            if (!activeFilters[type]) {
+                alertElement.style.display = 'none';
+            }
+            
+            // Remover a classe de animação pulsante após 10 segundos
+            setTimeout(() => {
+                alertElement.classList.remove('pulsing');
+            }, 10000);
+            
+            // Remover a classe new-alert após 2 segundos
+            setTimeout(() => {
+                alertElement.classList.remove('new-alert');
+            }, 2000);
+            
+            return alertElement;
+        }
+        
+        function addAlertToDOM(alertElement) {
+            // Remover mensagem de "Aguardando alertas" se existir
+            if (alertsDiv.children.length === 1 && alertsDiv.firstChild.tagName === 'P') {
+                alertsDiv.innerHTML = '';
+            }
+            
+            // Adicionar no topo
+            alertsDiv.insertBefore(alertElement, alertsDiv.firstChild);
+            
+            // Manter apenas os últimos 100 alertas
+            while (alertsDiv.children.length > 100) {
+                alertsDiv.removeChild(alertsDiv.lastChild);
+            }
+            
+            // Scroll para o topo
+            alertsDiv.scrollTop = 0;
+        }
+        
+        function addSystemMessage(message) {
+            const messageElement = document.createElement('div');
+            messageElement.className = 'system-message';
+            messageElement.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            
+            // Remover mensagem de "Aguardando alertas" se existir
+            if (alertsDiv.children.length === 1 && alertsDiv.firstChild.tagName === 'P') {
+                alertsDiv.innerHTML = '';
+            }
+            
+            alertsDiv.insertBefore(messageElement, alertsDiv.firstChild);
+            
+            // Manter apenas os últimos 100 alertas
+            while (alertsDiv.children.length > 100) {
+                alertsDiv.removeChild(alertsDiv.lastChild);
+            }
+        }
+        
+        function toggleFilter(type) {
+            activeFilters[type] = !activeFilters[type];
+            const filterBtn = document.querySelector(`.filter-btn[data-type="${type}"]`);
+            
+            if (activeFilters[type]) {
+                filterBtn.classList.add('active');
+            } else {
+                filterBtn.classList.remove('active');
+            }
+            
+            // Aplicar filtro a todos os alertas
+            const alerts = document.querySelectorAll('.alert');
+            alerts.forEach(alert => {
+                const alertType = alert.dataset.type;
+                if (alertType) {
+                    alert.style.display = activeFilters[alertType] ? 'block' : 'none';
+                }
+            });
+        }
+        
+        function clearAlerts() {
+            alertsDiv.innerHTML = '<p>Aguardando alertas...</p>';
+            alertCount = { volume: 0, rsi: 0, ema: 0, macd: 0 };
+            volumeCount.textContent = '0';
+            rsiCount.textContent = '0';
+            emaCount.textContent = '0';
+            macdCount.textContent = '0';
+        }
+        
+        // Formulário de monitoramento
+        form.addEventListener('submit', function(e) {
+            e.preventDefault();
+            const formData = new FormData(form);
+            
+            fetch('/start_monitoring', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.text())
+            .then(data => {
+                console.log('Resposta:', data);
+            })
+            .catch(error => {
+                console.error('Erro:', error);
+                addSystemMessage('Erro ao iniciar monitoramento: ' + error);
+            });
+        });
+        
+        function stopMonitoring() {
+            fetch('/stop_monitoring', {
+                method: 'POST'
+            })
+            .then(response => response.text())
+            .then(data => {
+                console.log('Monitoramento parado:', data);
+            })
+            .catch(error => {
+                console.error('Erro:', error);
+            });
+        }
+        
+        // Solicitar permissão para notificações
+        if ('Notification' in window && Notification.permission === 'default') {
+            Notification.requestPermission();
+        }
+    </script>
+</body>
+</html>

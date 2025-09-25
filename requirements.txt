@@ -1,0 +1,6 @@
+Flask==2.3.3
+Flask-SocketIO==5.5.1
+python-binance==1.0.19
+eventlet==0.40.3
+numpy==2.1.0
+pandas==2.2.2
