@@ -8,7 +8,6 @@ from binance.client import Client
 import time
 from datetime import datetime
 import numpy as np
-import pandas as pd
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'whale_detector_secret'
@@ -118,11 +117,27 @@ def calculate_rsi(prices, period=14):
         return [50.0] * len(prices)  # Valores neutros em caso de erro
 
 def calculate_ema(prices, period):
-    """Calcula EMA para uma lista de preços"""
+    """Calcula EMA para uma lista de preços - Implementação sem pandas"""
     if len(prices) < period:
         return [prices[0]] * len(prices) if prices else []
     
-    return pd.Series(prices).ewm(span=period, adjust=False).mean().values
+    # Calcular o multiplicador (smoothing factor)
+    multiplier = 2 / (period + 1)
+    
+    # Inicializar EMA com a média simples dos primeiros 'period' valores
+    sma_initial = sum(prices[:period]) / period
+    ema_values = [None] * (period - 1) + [sma_initial]
+    
+    # Calcular EMA para o restante dos valores
+    for i in range(period, len(prices)):
+        ema = (prices[i] * multiplier) + (ema_values[-1] * (1 - multiplier))
+        ema_values.append(ema)
+    
+    # Preencher os valores iniciais com o primeiro preço para manter consistência
+    for i in range(period - 1):
+        ema_values[i] = prices[0]
+    
+    return ema_values
 
 def calculate_macd(prices, fast_period=12, slow_period=26, signal_period=9):
     """Calcula MACD - Versão simplificada e robusta"""
