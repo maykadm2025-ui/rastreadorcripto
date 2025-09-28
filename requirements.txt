@@ -3,4 +3,4 @@ Flask-SocketIO==5.5.1
 python-binance==1.0.19
 eventlet==0.40.3
 numpy==2.1.0
-gunicorn
+gunicorn==21.2.0
