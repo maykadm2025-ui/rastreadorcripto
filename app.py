@@ -6,21 +6,35 @@ from flask import Flask, render_template, request
 from flask_socketio import SocketIO, emit
 from binance.client import Client
 import time
+import os
 from datetime import datetime
 import numpy as np
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'whale_detector_secret'
-socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
+
+# Configurar SocketIO com configurações otimizadas para produção
+socketio = SocketIO(
+    app, 
+    async_mode='eventlet', 
+    cors_allowed_origins="*",
+    ping_timeout=60,
+    ping_interval=25,
+    logger=False,
+    engineio_logger=False
+)
 
 client = Client()  # Cliente público da Binance, sem API key
 
 # Obter todos os símbolos USDT spot em trading
-exchange_info = client.get_exchange_info()
-symbols = [s['symbol'] for s in exchange_info['symbols'] 
-           if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING']
-
-print(f"Carregados {len(symbols)} símbolos USDT para monitoramento.")
+try:
+    exchange_info = client.get_exchange_info()
+    symbols = [s['symbol'] for s in exchange_info['symbols'] 
+               if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING']
+    print(f"Carregados {len(symbols)} símbolos USDT para monitoramento.")
+except Exception as e:
+    print(f"Erro ao carregar símbolos: {e}")
+    symbols = []
 
 # Dicionário para intervalos de verificação otimizados
 timeframe_to_check_interval = {
@@ -525,6 +539,23 @@ def handle_connect():
 def handle_disconnect():
     print('Cliente desconectado')
 
+# Adicionar rota de health check para Koyeb
+@app.route('/health')
+def health_check():
+    return {'status': 'healthy', 'symbols': len(symbols)}, 200
+
 if __name__ == '__main__':
-    print("Iniciando servidor Flask-SocketIO...")
-    socketio.run(app, debug=True, host='0.0.0.0', port=8080, use_reloader=False)
+    # Usar porta do ambiente ou padrão 8080
+    port = int(os.environ.get('PORT', 8080))
+    print(f"Iniciando servidor Flask-SocketIO na porta {port}...")
+    
+    # Em produção, não usar debug mode
+    debug_mode = os.environ.get('FLASK_ENV', 'production') == 'development'
+    
+    socketio.run(
+        app, 
+        debug=debug_mode, 
+        host='0.0.0.0', 
+        port=port, 
+        use_reloader=False
+    )
