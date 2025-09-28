@@ -527,4 +527,4 @@ def handle_disconnect():
 
 if __name__ == '__main__':
     print("Iniciando servidor Flask-SocketIO...")
-    socketio.run(app, debug=True, host='0.0.0.0', port=5000, use_reloader=False)
+    socketio.run(app, debug=True, host='0.0.0.0', port=8080, use_reloader=False)
