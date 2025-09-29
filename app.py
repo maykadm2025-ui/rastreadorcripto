@@ -4,7 +4,7 @@ from binance.client import Client
 import time
 import os
 from datetime import datetime
-import numpy as np
+import math
 import threading
 
 app = Flask(__name__)
@@ -294,8 +294,8 @@ def monitor_whales(timeframe, multiple, ema_type, my_thread_id):
                             previous_ema_slow = ema_slow_values[-2]
                             
                             # CONDIÇÃO EMA: EMA rápida anterior <= EMA lenta anterior E EMA rápida atual > EMA lenta atual
-                            if (not np.isnan(previous_ema_fast) and not np.isnan(previous_ema_slow) and 
-                                not np.isnan(current_ema_fast) and not np.isnan(current_ema_slow)):
+                            if (not math.isnan(previous_ema_fast) and not math.isnan(previous_ema_slow) and 
+                                not math.isnan(current_ema_fast) and not math.isnan(current_ema_slow)):
                                 
                                 if previous_ema_fast <= previous_ema_slow and current_ema_fast > current_ema_slow:
                                     ema_alert = {
@@ -336,8 +336,8 @@ def monitor_whales(timeframe, multiple, ema_type, my_thread_id):
                             previous_signal = signal_line[-2]
                             
                             # CONDIÇÃO MACD: MACD anterior <= Signal anterior E MACD atual > Signal atual
-                            if (not np.isnan(previous_macd) and not np.isnan(previous_signal) and 
-                                not np.isnan(current_macd) and not np.isnan(current_signal)):
+                            if (not math.isnan(previous_macd) and not math.isnan(previous_signal) and 
+                                not math.isnan(current_macd) and not math.isnan(current_signal)):
                                 
                                 if previous_macd <= previous_signal and current_macd > current_signal:
                                     macd_alert = {
