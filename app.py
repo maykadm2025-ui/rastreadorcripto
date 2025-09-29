@@ -1,7 +1,3 @@
-# Importante: eventlet.monkey_patch() deve ser a PRIMEIRA linha antes de qualquer import
-import eventlet
-eventlet.monkey_patch(all=True, thread=False)  # thread=False para evitar conflitos
-
 from flask import Flask, render_template, request
 from flask_socketio import SocketIO, emit
 from binance.client import Client
