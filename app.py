@@ -5,14 +5,15 @@ import time
 import os
 from datetime import datetime
 import numpy as np
+import threading
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'whale_detector_secret'
 
-# Configurar SocketIO com configurações otimizadas para produção
+# Configurar SocketIO com async_mode='threading' para Uvicorn
 socketio = SocketIO(
     app, 
-    async_mode='eventlet', 
+    async_mode='threading',
     cors_allowed_origins="*",
     ping_timeout=60,
     ping_interval=25,
@@ -410,9 +411,9 @@ def monitor_whales(timeframe, multiple, ema_type, my_thread_id):
                     
             except Exception as e:
                 print(f"❌ Erro geral thread {my_thread_id} - {symbol}: {e}")
-                eventlet.sleep(0.1)
+                time.sleep(0.1)
             
-            eventlet.sleep(0.01)  # Pequena pausa entre símbolos
+            time.sleep(0.01)  # Pequena pausa entre símbolos
         
         # Verificar se ainda é thread ativa antes de esperar
         if my_thread_id != thread_id:
@@ -429,7 +430,7 @@ def monitor_whales(timeframe, multiple, ema_type, my_thread_id):
         print("=" * 60)
         
         # Espera adaptativa baseada no timeframe
-        eventlet.sleep(check_interval)
+        time.sleep(check_interval)
 
 @app.route('/')
 def index():
@@ -480,13 +481,18 @@ def start_monitoring():
         print(f"🆔 NOVO THREAD ID: {new_thread_id}")
         
         # Aguardar threads antigas pararem
-        eventlet.sleep(1.0)  
+        time.sleep(1.0)  
         
         # RESETAR controle
         stop_monitoring = False
         
         # INICIAR NOVA THREAD com ID único
-        monitoring_thread = eventlet.spawn(monitor_whales, timeframe, multiple, ema_type, new_thread_id)
+        monitoring_thread = threading.Thread(
+            target=monitor_whales, 
+            args=(timeframe, multiple, ema_type, new_thread_id),
+            daemon=True
+        )
+        monitoring_thread.start()
         
         print(f"✅ THREAD {new_thread_id} INICIADA COM MÚLTIPLO {multiple} e EMA {ema_type}")
         return f"Monitoramento iniciado - Thread {new_thread_id}", 200
@@ -505,14 +511,7 @@ def stop_monitoring_route():
     stop_monitoring = True
     thread_id += 1  # Invalidar todas as threads existentes
     
-    if monitoring_thread:
-        try:
-            monitoring_thread.kill()
-            print("Thread principal encerrada")
-        except:
-            pass
-        monitoring_thread = None
-    
+    monitoring_thread = None
     current_ema_type = None
     socketio.emit('monitoring_stopped', {'status': 'Parado'})
     print(f"✅ MONITORAMENTO PARADO - Novo thread_id: {thread_id}")
