@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request
+from flask import Flask, render_template_string, request
 from flask_socketio import SocketIO, emit
 from binance.client import Client
 import time
@@ -6,32 +6,46 @@ import os
 from datetime import datetime
 import math
 import threading
+import requests
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'whale_detector_secret'
 
-# Configurar SocketIO com async_mode='threading' para Uvicorn
+# Configurar SocketIO com async_mode='threading' - MAIS ESTÁVEL
 socketio = SocketIO(
     app, 
     async_mode='threading',
     cors_allowed_origins="*",
     ping_timeout=60,
     ping_interval=25,
-    logger=False,
+    logger=True,
     engineio_logger=False
 )
 
-client = Client()  # Cliente público da Binance, sem API key
-
-# Obter todos os símbolos USDT spot em trading
+# Inicializar cliente Binance com tratamento de erro
 try:
-    exchange_info = client.get_exchange_info()
-    symbols = [s['symbol'] for s in exchange_info['symbols'] 
-               if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING']
-    print(f"Carregados {len(symbols)} símbolos USDT para monitoramento.")
+    client = Client()
+    print("✅ Cliente Binance inicializado com sucesso")
 except Exception as e:
-    print(f"Erro ao carregar símbolos: {e}")
-    symbols = []
+    print(f"❌ Erro ao inicializar cliente Binance: {e}")
+    client = None
+
+# Obter símbolos USDT - com fallback
+try:
+    if client:
+        exchange_info = client.get_exchange_info()
+        symbols = [s['symbol'] for s in exchange_info['symbols'] 
+                   if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING']
+        print(f"✅ Carregados {len(symbols)} símbolos USDT para monitoramento.")
+    else:
+        # Fallback para símbolos principais se Binance falhar
+        symbols = ['BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 
+                  'DOTUSDT', 'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT', 'LTCUSDT', 'LINKUSDT']
+        print(f"⚠️ Usando {len(symbols)} símbolos principais (fallback)")
+except Exception as e:
+    print(f"❌ Erro ao carregar símbolos: {e}")
+    symbols = ['BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'BNBUSDT', 'SOLUSDT']
+    print(f"⚠️ Usando {len(symbols)} símbolos básicos (fallback de emergência)")
 
 # Dicionário para intervalos de verificação otimizados
 timeframe_to_check_interval = {
@@ -62,7 +76,7 @@ stop_monitoring = False
 current_timeframe = None
 current_multiple = None
 current_ema_type = None
-thread_id = 0  # ID único para cada thread
+thread_id = 0
 
 # Dicionário para acompanhar o último timestamp processado por símbolo
 last_processed = {}
@@ -73,24 +87,10 @@ def calculate_rsi(prices, period=14):
         return []
     
     try:
-        # Calcular mudanças de preço
-        deltas = []
-        for i in range(1, len(prices)):
-            deltas.append(prices[i] - prices[i-1])
+        deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
+        gains = [max(delta, 0) for delta in deltas]
+        losses = [max(-delta, 0) for delta in deltas]
         
-        # Separar ganhos e perdas
-        gains = []
-        losses = []
-        
-        for delta in deltas:
-            if delta > 0:
-                gains.append(delta)
-                losses.append(0)
-            else:
-                gains.append(0)
-                losses.append(-delta)
-        
-        # Calcular médias móveis simples iniciais
         if len(gains) < period:
             return []
             
@@ -99,80 +99,70 @@ def calculate_rsi(prices, period=14):
         
         rsi_values = []
         
-        # Primeira valor RSI
         if avg_loss == 0:
-            rs = 0
+            rsi_values.append(100)
         else:
             rs = avg_gain / avg_loss
-        rsi_values.append(100 - (100 / (1 + rs)))
+            rsi_values.append(100 - (100 / (1 + rs)))
         
-        # Calcular RSI para os valores restantes usando Wilder's smoothing
         for i in range(period, len(gains)):
             avg_gain = (avg_gain * (period - 1) + gains[i]) / period
             avg_loss = (avg_loss * (period - 1) + losses[i]) / period
             
             if avg_loss == 0:
-                rs = 0
+                rsi_values.append(100)
             else:
                 rs = avg_gain / avg_loss
-            rsi_values.append(100 - (100 / (1 + rs)))
+                rsi_values.append(100 - (100 / (1 + rs)))
         
-        # Preencher os valores iniciais com None para manter o tamanho correto
-        result = [50.0] * period  # Valores neutros para as primeiras posições
+        result = [50.0] * period
         result.extend(rsi_values)
-        
-        return result[-len(prices):]  # Retornar apenas o tamanho dos preços
+        return result[-len(prices):]
         
     except Exception as e:
         print(f"❌ Erro no cálculo RSI: {e}")
-        return [50.0] * len(prices)  # Valores neutros em caso de erro
+        return [50.0] * len(prices)
 
 def calculate_ema(prices, period):
-    """Calcula EMA para uma lista de preços - Implementação sem pandas"""
+    """Calcula EMA para uma lista de preços"""
     if len(prices) < period:
         return [prices[0]] * len(prices) if prices else []
     
-    # Calcular o multiplicador (smoothing factor)
     multiplier = 2 / (period + 1)
-    
-    # Inicializar EMA com a média simples dos primeiros 'period' valores
     sma_initial = sum(prices[:period]) / period
     ema_values = [None] * (period - 1) + [sma_initial]
     
-    # Calcular EMA para o restante dos valores
     for i in range(period, len(prices)):
         ema = (prices[i] * multiplier) + (ema_values[-1] * (1 - multiplier))
         ema_values.append(ema)
     
-    # Preencher os valores iniciais com o primeiro preço para manter consistência
     for i in range(period - 1):
         ema_values[i] = prices[0]
     
     return ema_values
 
 def calculate_macd(prices, fast_period=12, slow_period=26, signal_period=9):
-    """Calcula MACD - Versão simplificada e robusta"""
+    """Calcula MACD - Versão simplificada"""
     if len(prices) < max(fast_period, slow_period, signal_period):
         return [], []
     
     try:
-        # Calcular EMAs rápida e lenta
         ema_fast = calculate_ema(prices, fast_period)
         ema_slow = calculate_ema(prices, slow_period)
-        
-        # Calcular linha MACD
-        macd_line = []
-        for i in range(len(ema_fast)):
-            macd_line.append(ema_fast[i] - ema_slow[i])
-        
-        # Calcular linha de sinal (EMA do MACD)
+        macd_line = [ema_fast[i] - ema_slow[i] for i in range(len(ema_fast))]
         signal_line = calculate_ema(macd_line, signal_period)
-        
         return macd_line, signal_line
-        
     except Exception as e:
         print(f"❌ Erro no cálculo MACD: {e}")
         return [0.0] * len(prices), [0.0] * len(prices)
+
+def safe_binance_request(func, *args, **kwargs):
+    """Wrapper seguro para requests da Binance"""
+    try:
+        return func(*args, **kwargs)
+    except Exception as e:
+        print(f"❌ Erro na requisição Binance: {e}")
+        return None
 
 def monitor_whales(timeframe, multiple, ema_type, my_thread_id):
     global stop_monitoring, current_timeframe, current_multiple, current_ema_type, thread_id, last_processed
@@ -182,7 +172,6 @@ def monitor_whales(timeframe, multiple, ema_type, my_thread_id):
     print(f"   - Múltiplo mínimo: {multiple}")
     print(f"   - EMA Type: {ema_type} ({EMA_CONFIGS[ema_type]['name']})")
     
-    # Verificar se esta thread ainda é válida
     if my_thread_id != thread_id:
         print(f"❌ THREAD {my_thread_id} CANCELADA - Nova thread {thread_id} iniciada")
         return
@@ -194,7 +183,7 @@ def monitor_whales(timeframe, multiple, ema_type, my_thread_id):
     fast_period = ema_config['fast']
     slow_period = ema_config['slow']
     
-    check_interval = timeframe_to_check_interval.get(timeframe, 20)  # Padrão de 20 segundos
+    check_interval = timeframe_to_check_interval.get(timeframe, 20)
     
     socketio.emit('monitoring_started', {
         'status': 'Iniciado', 
@@ -216,231 +205,436 @@ def monitor_whales(timeframe, multiple, ema_type, my_thread_id):
         print(f"🔍 THREAD {my_thread_id} - CICLO {cycle_count} - Múltiplo: {multiple} - EMA: {ema_config['name']}")
         
         for symbol in symbols:
-            # VERIFICAR A CADA SÍMBOLO se ainda é a thread ativa
             if stop_monitoring or my_thread_id != thread_id:
                 print(f"❌ THREAD {my_thread_id} INTERROMPIDA")
                 return
                 
             try:
-                # Verificar se precisamos processar este símbolo (evitar processamento excessivo)
                 current_time = time.time()
                 if symbol in last_processed and (current_time - last_processed[symbol]) < check_interval/2:
                     continue
                 
                 last_processed[symbol] = current_time
                 
-                # Fetch mais velas para cálculos de indicadores
-                klines = client.get_klines(symbol=symbol, interval=timeframe, limit=100)
-                if len(klines) < 50:  # Mínimo necessário para cálculos
+                # Usar wrapper seguro para request Binance
+                klines = safe_binance_request(client.get_klines, symbol=symbol, interval=timeframe, limit=100)
+                if not klines or len(klines) < 50:
                     continue
                 
-                # Extrair preços de fechamento
                 closes = [float(k[4]) for k in klines]
-                
                 processed_count += 1
                 
-                # Debug para alguns símbolos específicos
-                is_debug_symbol = symbol in ['BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'BNBUSDT', 'SOLUSDT']
-                
-                # =========================
                 # 1. VERIFICAÇÃO RSI
-                # =========================
                 try:
                     rsi_values = calculate_rsi(closes, period=14)
-                    
                     if len(rsi_values) >= 2:
                         current_rsi = rsi_values[-1]
                         previous_rsi = rsi_values[-2]
                         
-                        # CONDIÇÃO RSI: RSI anterior <= 30 E RSI atual > 31
                         if previous_rsi <= 30 and current_rsi > 31:
                             rsi_alert = {
                                 'type': 'RSI',
                                 'crypto': symbol.replace('USDT', ''),
                                 'previous_rsi': round(previous_rsi, 2),
                                 'current_rsi': round(current_rsi, 2),
-                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                'timestamp': datetime.now().strftime('%H:%M:%S'),
                                 'timeframe': timeframe,
                                 'thread_id': my_thread_id
                             }
                             socketio.emit('indicator_alert', rsi_alert)
                             rsi_alerts += 1
-                            print(f"🚨📈 RSI ALERT: {symbol} - Anterior: {previous_rsi:.2f} → Atual: {current_rsi:.2f}")
-                        
-                        # Debug adicional para valores baixos
-                        if (previous_rsi <= 35 or current_rsi <= 35) and is_debug_symbol:
-                            print(f"⚠️ RSI BAIXO {symbol}: Anterior={previous_rsi:.2f}, Atual={current_rsi:.2f}")
-                    
-                    else:
-                        if is_debug_symbol:
-                            print(f"❌ DEBUG RSI {symbol}: Dados insuficientes - {len(rsi_values)} valores")
-                    
+                            print(f"🚨📈 RSI ALERT: {symbol} - {previous_rsi:.2f} → {current_rsi:.2f}")
                 except Exception as rsi_error:
-                    print(f"❌ Erro RSI {symbol}: {rsi_error}")
+                    pass
                 
-                # =========================
                 # 2. VERIFICAÇÃO EMA
-                # =========================
                 try:
-                    # Garantir dados suficientes para a EMA mais lenta
                     if len(closes) >= slow_period:  
                         ema_fast_values = calculate_ema(closes, fast_period)
                         ema_slow_values = calculate_ema(closes, slow_period)
                         
-                        if len(ema_fast_values) >= 2 and len(ema_slow_values) >= 2:
-                            current_ema_fast = ema_fast_values[-1]
-                            previous_ema_fast = ema_fast_values[-2]
-                            current_ema_slow = ema_slow_values[-1]
-                            previous_ema_slow = ema_slow_values[-2]
+                        if (len(ema_fast_values) >= 2 and len(ema_slow_values) >= 2 and
+                            not math.isnan(ema_fast_values[-2]) and not math.isnan(ema_slow_values[-2]) and
+                            not math.isnan(ema_fast_values[-1]) and not math.isnan(ema_slow_values[-1])):
                             
-                            # CONDIÇÃO EMA: EMA rápida anterior <= EMA lenta anterior E EMA rápida atual > EMA lenta atual
-                            if (not math.isnan(previous_ema_fast) and not math.isnan(previous_ema_slow) and 
-                                not math.isnan(current_ema_fast) and not math.isnan(current_ema_slow)):
-                                
-                                if previous_ema_fast <= previous_ema_slow and current_ema_fast > current_ema_slow:
-                                    ema_alert = {
-                                        'type': 'EMA',
-                                        'crypto': symbol.replace('USDT', ''),
-                                        'previous_ema_fast': round(previous_ema_fast, 6),
-                                        'previous_ema_slow': round(previous_ema_slow, 6),
-                                        'current_ema_fast': round(current_ema_fast, 6),
-                                        'current_ema_slow': round(current_ema_slow, 6),
-                                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                        'timeframe': timeframe,
-                                        'ema_type': ema_type,
-                                        'ema_name': ema_config['name'],
-                                        'thread_id': my_thread_id
-                                    }
-                                    socketio.emit('indicator_alert', ema_alert)
-                                    ema_alerts += 1
-                                    print(f"🚨📈 EMA ALERT ({ema_config['name']}): {symbol}")
-                                    print(f"   Anterior: EMA{fast_period}({previous_ema_fast:.6f}) <= EMA{slow_period}({previous_ema_slow:.6f})")
-                                    print(f"   Atual: EMA{fast_period}({current_ema_fast:.6f}) > EMA{slow_period}({current_ema_slow:.6f})")
-                
+                            if (ema_fast_values[-2] <= ema_slow_values[-2] and 
+                                ema_fast_values[-1] > ema_slow_values[-1]):
+                                ema_alert = {
+                                    'type': 'EMA',
+                                    'crypto': symbol.replace('USDT', ''),
+                                    'ema_name': ema_config['name'],
+                                    'timestamp': datetime.now().strftime('%H:%M:%S'),
+                                    'timeframe': timeframe,
+                                    'thread_id': my_thread_id
+                                }
+                                socketio.emit('indicator_alert', ema_alert)
+                                ema_alerts += 1
+                                print(f"🚨📈 EMA ALERT ({ema_config['name']}): {symbol}")
                 except Exception as ema_error:
-                    if is_debug_symbol:
-                        print(f"❌ Erro EMA {symbol}: {ema_error}")
+                    pass
 
-                # =========================
                 # 3. VERIFICAÇÃO MACD
-                # =========================
                 try:
-                    # Garantir dados suficientes para MACD (precisa de pelo menos 26 + 9 = 35 períodos)
                     if len(closes) >= 35:
                         macd_line, signal_line = calculate_macd(closes)
                         
-                        if len(macd_line) >= 2 and len(signal_line) >= 2:
-                            current_macd = macd_line[-1]
-                            previous_macd = macd_line[-2]
-                            current_signal = signal_line[-1]
-                            previous_signal = signal_line[-2]
+                        if (len(macd_line) >= 2 and len(signal_line) >= 2 and
+                            not math.isnan(macd_line[-2]) and not math.isnan(signal_line[-2]) and
+                            not math.isnan(macd_line[-1]) and not math.isnan(signal_line[-1])):
                             
-                            # CONDIÇÃO MACD: MACD anterior <= Signal anterior E MACD atual > Signal atual
-                            if (not math.isnan(previous_macd) and not math.isnan(previous_signal) and 
-                                not math.isnan(current_macd) and not math.isnan(current_signal)):
-                                
-                                if previous_macd <= previous_signal and current_macd > current_signal:
-                                    macd_alert = {
-                                        'type': 'MACD',
-                                        'crypto': symbol.replace('USDT', ''),
-                                        'previous_macd': round(previous_macd, 8),
-                                        'previous_signal': round(previous_signal, 8),
-                                        'current_macd': round(current_macd, 8),
-                                        'current_signal': round(current_signal, 8),
-                                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                        'timeframe': timeframe,
-                                        'thread_id': my_thread_id
-                                    }
-                                    socketio.emit('indicator_alert', macd_alert)
-                                    macd_alerts += 1
-                                    print(f"🚨📈 MACD ALERT: {symbol}")
-                                    print(f"   Anterior: MACD({previous_macd:.8f}) <= Signal({previous_signal:.8f})")
-                                    print(f"   Atual: MACD({current_macd:.8f}) > Signal({current_signal:.8f})")
-                                
-                                # Debug adicional para valores próximos
-                                if abs(current_macd - current_signal) < abs(previous_macd - previous_signal) * 0.1 and is_debug_symbol:
-                                    print(f"⚠️ MACD PRÓXIMO {symbol}: MACD={current_macd:.8f}, Signal={current_signal:.8f}")
-                
+                            if (macd_line[-2] <= signal_line[-2] and 
+                                macd_line[-1] > signal_line[-1]):
+                                macd_alert = {
+                                    'type': 'MACD',
+                                    'crypto': symbol.replace('USDT', ''),
+                                    'timestamp': datetime.now().strftime('%H:%M:%S'),
+                                    'timeframe': timeframe,
+                                    'thread_id': my_thread_id
+                                }
+                                socketio.emit('indicator_alert', macd_alert)
+                                macd_alerts += 1
+                                print(f"🚨📈 MACD ALERT: {symbol}")
                 except Exception as macd_error:
-                    if is_debug_symbol:
-                        print(f"❌ Erro MACD {symbol}: {macd_error}")
+                    pass
 
-                # =========================
                 # 4. VERIFICAÇÃO VOLUME
-                # =========================
                 try:
-                    # Buscar dados específicos para volume
-                    klines_volume = client.get_klines(symbol=symbol, interval=timeframe, limit=21)
-                    if len(klines_volume) < 21:
+                    klines_volume = safe_binance_request(client.get_klines, symbol=symbol, interval=timeframe, limit=21)
+                    if not klines_volume or len(klines_volume) < 21:
                         continue
                     
-                    # Usar a vela mais recente para volume atual
                     current_volume = float(klines_volume[-1][5])
-                    
-                    # Calcular média das últimas 20 velas (excluindo a atual)
                     historical_volumes = [float(k[5]) for k in klines_volume[-21:-1]]
-                    
-                    # Média das velas HISTÓRICAS
                     avg_volume = sum(historical_volumes) / len(historical_volumes) if historical_volumes else 0
                     
                     if avg_volume > 0:
                         calculated_multiple = current_volume / avg_volume
                         
-                        # Debug volume para alguns símbolos
-                        if is_debug_symbol and cycle_count % 5 == 0:  # Debug a cada 5 ciclos
-                            print(f"🔍 DEBUG VOLUME {symbol}: Atual={current_volume:.0f}, Média={avg_volume:.0f}, Múltiplo={calculated_multiple:.2f}")
-                        
-                        # CONDIÇÃO VOLUME: Volume atual > múltiplo * média
                         if calculated_multiple >= multiple and my_thread_id == thread_id:
                             alert = {
                                 'crypto': symbol.replace('USDT', ''),
                                 'volume': round(current_volume, 2),
                                 'avg_volume': round(avg_volume, 2),
                                 'multiple': round(calculated_multiple, 2),
-                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                'timestamp': datetime.now().strftime('%H:%M:%S'),
                                 'timeframe': timeframe,
                                 'thread_id': my_thread_id
                             }
                             socketio.emit('whale_alert', alert)
                             alerts_count += 1
-                            print(f"🚨📊 VOLUME ALERT: {symbol} = {calculated_multiple:.2f}x (mín: {multiple}x)")
+                            print(f"🚨📊 VOLUME ALERT: {symbol} = {calculated_multiple:.2f}x")
                 
                 except Exception as volume_error:
-                    if is_debug_symbol:
-                        print(f"❌ Erro VOLUME {symbol}: {volume_error}")
+                    pass
                     
             except Exception as e:
-                print(f"❌ Erro geral thread {my_thread_id} - {symbol}: {e}")
-                time.sleep(0.1)
+                print(f"❌ Erro geral {symbol}: {e}")
             
-            time.sleep(0.01)  # Pequena pausa entre símbolos
+            time.sleep(0.01)
         
-        # Verificar se ainda é thread ativa antes de esperar
         if my_thread_id != thread_id:
-            print(f"❌ THREAD {my_thread_id} FINALIZADA - Nova thread ativa")
+            print(f"❌ THREAD {my_thread_id} FINALIZADA")
             return
             
-        print(f"✅ THREAD {my_thread_id} - CICLO {cycle_count} COMPLETO:")
-        print(f"   - Alertas Volume: {alerts_count} (múltiplo {multiple})")
-        print(f"   - Alertas RSI: {rsi_alerts}")
-        print(f"   - Alertas EMA: {ema_alerts}")
-        print(f"   - Alertas MACD: {macd_alerts}")
-        print(f"   - Símbolos processados: {processed_count}")
-        print(f"   - Próxima verificação: {check_interval}s")
+        print(f"✅ CICLO {cycle_count} COMPLETO - Volume: {alerts_count}, RSI: {rsi_alerts}, EMA: {ema_alerts}, MACD: {macd_alerts}")
+        print(f"   Símbolos processados: {processed_count}, Próxima verificação: {check_interval}s")
         print("=" * 60)
         
-        # Espera adaptativa baseada no timeframe
         time.sleep(check_interval)
+
+# Template HTML simplificado
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Whale Detector - Binance</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        .alert-fade-in { animation: fadeIn 0.5s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+        .pulse-alert { animation: pulse 2s infinite; }
+        @keyframes pulse { 
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white">
+    <div class="container mx-auto px-4 py-8">
+        <div class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-green-400 mb-2">
+                <i class="fas fa-whale mr-3"></i>Whale Detector
+            </h1>
+            <p class="text-gray-400">Monitoramento em tempo real - Binance</p>
+        </div>
+
+        <div class="bg-gray-800 rounded-lg p-6 mb-8">
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Timeframe</label>
+                    <select id="timeframe" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
+                        <option value="1m">1 Minuto</option>
+                        <option value="5m">5 Minutos</option>
+                        <option value="15m">15 Minutos</option>
+                        <option value="1h">1 Hora</option>
+                        <option value="4h">4 Horas</option>
+                        <option value="1d">1 Dia</option>
+                    </select>
+                </div>
+                
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Múltiplo Mínimo</label>
+                    <select id="multiple" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
+                        <option value="3">3x</option>
+                        <option value="5">5x</option>
+                        <option value="8">8x</option>
+                        <option value="10">10x</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">Configuração EMA</label>
+                    <select id="ema_type" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
+                        <option value="ema_7_21">EMA 7x21 (Curto Prazo)</option>
+                        <option value="ema_20_50">EMA 20x50 (Swing Trade)</option>
+                        <option value="ema_50_200">EMA 50x200 (Golden Cross)</option>
+                    </select>
+                </div>
+
+                <div class="flex items-end space-x-2">
+                    <button id="startBtn" class="flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg">
+                        <i class="fas fa-play mr-2"></i>Iniciar
+                    </button>
+                    <button id="stopBtn" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg">
+                        <i class="fas fa-stop mr-2"></i>Parar
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div id="status" class="bg-gray-800 rounded-lg p-4 mb-8 hidden">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h3 class="text-lg font-semibold text-green-400">
+                        <i class="fas fa-circle animate-pulse text-green-500 mr-2"></i>
+                        Monitoramento Ativo
+                    </h3>
+                    <p id="statusDetails" class="text-gray-400 text-sm"></p>
+                </div>
+                <div id="connectionStatus" class="flex items-center text-green-500">
+                    <i class="fas fa-wifi mr-2"></i>
+                    <span>Conectado</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div class="bg-gray-800 rounded-lg p-6">
+                <h2 class="text-xl font-bold text-yellow-400 mb-4">
+                    <i class="fas fa-chart-bar mr-2"></i>Alertas de Volume
+                </h2>
+                <div id="volumeAlerts" class="space-y-3 max-h-96 overflow-y-auto">
+                    <div class="text-gray-500 text-center py-4">Aguardando alertas...</div>
+                </div>
+            </div>
+
+            <div class="bg-gray-800 rounded-lg p-6">
+                <h2 class="text-xl font-bold text-blue-400 mb-4">
+                    <i class="fas fa-chart-line mr-2"></i>Alertas de Indicadores
+                </h2>
+                <div id="indicatorAlerts" class="space-y-3 max-h-96 overflow-y-auto">
+                    <div class="text-gray-500 text-center py-4">Aguardando alertas...</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="mt-8 grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div class="bg-gray-800 rounded-lg p-4 text-center">
+                <div class="text-2xl font-bold text-green-400" id="totalSymbols">0</div>
+                <div class="text-gray-400 text-sm">Símbolos</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4 text-center">
+                <div class="text-2xl font-bold text-yellow-400" id="volumeAlertsCount">0</div>
+                <div class="text-gray-400 text-sm">Alertas Volume</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4 text-center">
+                <div class="text-2xl font-bold text-blue-400" id="indicatorAlertsCount">0</div>
+                <div class="text-gray-400 text-sm">Alertas Indicadores</div>
+            </div>
+            <div class="bg-gray-800 rounded-lg p-4 text-center">
+                <div class="text-2xl font-bold text-purple-400" id="lastUpdate">-</div>
+                <div class="text-gray-400 text-sm">Última Atualização</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let volumeAlertCount = 0;
+        let indicatorAlertCount = 0;
+
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const statusDiv = document.getElementById('status');
+        const statusDetails = document.getElementById('statusDetails');
+        const volumeAlertsDiv = document.getElementById('volumeAlerts');
+        const indicatorAlertsDiv = document.getElementById('indicatorAlerts');
+        const totalSymbolsSpan = document.getElementById('totalSymbols');
+        const volumeAlertsCountSpan = document.getElementById('volumeAlertsCount');
+        const indicatorAlertsCountSpan = document.getElementById('indicatorAlertsCount');
+        const lastUpdateSpan = document.getElementById('lastUpdate');
+
+        startBtn.addEventListener('click', () => {
+            const timeframe = document.getElementById('timeframe').value;
+            const multiple = document.getElementById('multiple').value;
+            const emaType = document.getElementById('ema_type').value;
+
+            fetch('/start_monitoring', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: `timeframe=${timeframe}&multiple=${multiple}&ema_type=${emaType}`
+            }).then(response => response.text()).then(data => {
+                console.log('Iniciado:', data);
+            }).catch(error => {
+                console.error('Erro:', error);
+            });
+        });
+
+        stopBtn.addEventListener('click', () => {
+            fetch('/stop_monitoring', {method: 'POST'})
+            .then(response => response.text())
+            .then(data => console.log('Parado:', data))
+            .catch(error => console.error('Erro:', error));
+        });
+
+        socket.on('connect', () => {
+            console.log('Conectado ao servidor');
+            document.getElementById('connectionStatus').innerHTML = '<i class="fas fa-wifi mr-2"></i><span>Conectado</span>';
+        });
+
+        socket.on('disconnect', () => {
+            console.log('Desconectado');
+            document.getElementById('connectionStatus').innerHTML = '<i class="fas fa-wifi mr-2"></i><span class="text-red-500">Desconectado</span>';
+        });
+
+        socket.on('monitoring_started', (data) => {
+            statusDiv.classList.remove('hidden');
+            statusDetails.innerHTML = `Timeframe: ${data.timeframe} | Múltiplo: ${data.multiple}x | EMA: ${data.ema_name}`;
+        });
+
+        socket.on('monitoring_stopped', (data) => {
+            statusDiv.classList.add('hidden');
+        });
+
+        socket.on('whale_alert', (alert) => {
+            volumeAlertCount++;
+            addVolumeAlert(alert);
+            updateStats();
+        });
+
+        socket.on('indicator_alert', (alert) => {
+            indicatorAlertCount++;
+            addIndicatorAlert(alert);
+            updateStats();
+        });
+
+        function addVolumeAlert(alert) {
+            const alertElement = document.createElement('div');
+            alertElement.className = 'alert-fade-in pulse-alert bg-yellow-900 border-l-4 border-yellow-500 p-3 rounded';
+            alertElement.innerHTML = `
+                <div class="flex justify-between items-start">
+                    <div>
+                        <div class="font-bold text-yellow-300 text-lg">${alert.crypto}</div>
+                        <div class="text-yellow-200 text-sm">Volume: ${formatNumber(alert.volume)}</div>
+                        <div class="text-gray-300 text-xs">Média: ${formatNumber(alert.avg_volume)} (${alert.multiple}x)</div>
+                    </div>
+                    <div class="text-right">
+                        <div class="text-yellow-400 font-bold">${alert.multiple}x</div>
+                        <div class="text-gray-400 text-xs">${alert.timestamp}</div>
+                    </div>
+                </div>
+                <div class="text-gray-400 text-xs mt-1">${alert.timeframe}</div>
+            `;
+
+            if (volumeAlertsDiv.firstChild?.className?.includes('text-gray-500')) {
+                volumeAlertsDiv.innerHTML = '';
+            }
+            volumeAlertsDiv.insertBefore(alertElement, volumeAlertsDiv.firstChild);
+
+            if (volumeAlertsDiv.children.length > 20) {
+                volumeAlertsDiv.removeChild(volumeAlertsDiv.lastChild);
+            }
+        }
+
+        function addIndicatorAlert(alert) {
+            const colors = {RSI: 'green', EMA: 'purple', MACD: 'pink'};
+            const color = colors[alert.type] || 'blue';
+            
+            const alertElement = document.createElement('div');
+            alertElement.className = `alert-fade-in pulse-alert bg-${color}-900 border-l-4 border-${color}-500 p-3 rounded`;
+            alertElement.innerHTML = `
+                <div class="flex justify-between items-start">
+                    <div>
+                        <div class="font-bold text-${color}-300 text-lg">${alert.crypto}</div>
+                        <div class="text-${color}-200 text-sm">${alert.type}</div>
+                        ${alert.ema_name ? `<div class="text-gray-300 text-xs">${alert.ema_name}</div>` : ''}
+                    </div>
+                    <div class="text-right">
+                        <div class="text-${color}-400 font-bold">${alert.type}</div>
+                        <div class="text-gray-400 text-xs">${alert.timestamp}</div>
+                    </div>
+                </div>
+                <div class="text-gray-400 text-xs mt-1">${alert.timeframe}</div>
+            `;
+
+            if (indicatorAlertsDiv.firstChild?.className?.includes('text-gray-500')) {
+                indicatorAlertsDiv.innerHTML = '';
+            }
+            indicatorAlertsDiv.insertBefore(alertElement, indicatorAlertsDiv.firstChild);
+
+            if (indicatorAlertsDiv.children.length > 20) {
+                indicatorAlertsDiv.removeChild(indicatorAlertsDiv.lastChild);
+            }
+        }
+
+        function formatNumber(num) {
+            if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
+            if (num >= 1000) return (num / 1000).toFixed(2) + 'K';
+            return num.toFixed(2);
+        }
+
+        function updateStats() {
+            volumeAlertsCountSpan.textContent = volumeAlertCount;
+            indicatorAlertsCountSpan.textContent = indicatorAlertCount;
+            lastUpdateSpan.textContent = new Date().toLocaleTimeString();
+        }
+
+        updateStats();
+        
+        fetch('/status')
+            .then(response => response.json())
+            .then(data => {
+                totalSymbolsSpan.textContent = data.total_symbols;
+                if (data.monitoring_active) {
+                    showStatus(data);
+                }
+            });
+    </script>
+</body>
+</html>
+'''
 
 @app.route('/')
 def index():
-    return render_template('index.html', 
-                         timeframes=list(timeframe_to_check_interval.keys()),
-                         ema_configs=EMA_CONFIGS)
+    return render_template_string(HTML_TEMPLATE)
 
 @app.route('/status')
 def status():
-    """Rota para verificar status do monitoramento"""
     ema_name = EMA_CONFIGS.get(current_ema_type, {}).get('name', '') if current_ema_type else ''
     return {
         'monitoring_active': not stop_monitoring,
@@ -459,12 +653,7 @@ def start_monitoring():
     try:
         timeframe = request.form['timeframe']
         multiple = float(request.form['multiple'])
-        ema_type = request.form.get('ema_type', 'ema_7_21')  # Default para EMA 7x21
-        
-        print(f"🔧 NOVO PEDIDO:")
-        print(f"   - Timeframe: {timeframe}")
-        print(f"   - Multiple: {multiple}")
-        print(f"   - EMA Type: {ema_type} ({EMA_CONFIGS.get(ema_type, {}).get('name', 'Desconhecido')})")
+        ema_type = request.form.get('ema_type', 'ema_7_21')
         
         if timeframe not in timeframe_to_check_interval:
             return "Timeframe inválido.", 400
@@ -472,21 +661,15 @@ def start_monitoring():
         if ema_type not in EMA_CONFIGS:
             return "Tipo de EMA inválido.", 400
         
-        # PARAR TUDO IMEDIATAMENTE
         stop_monitoring = True
-        thread_id += 1  # Incrementar ID para invalidar threads antigas
+        thread_id += 1
         new_thread_id = thread_id
         
-        print(f"🛑 PARANDO TODAS AS THREADS ANTIGAS")
-        print(f"🆔 NOVO THREAD ID: {new_thread_id}")
+        print(f"🛑 Parando threads antigas. Nova thread: {new_thread_id}")
+        time.sleep(1.0)
         
-        # Aguardar threads antigas pararem
-        time.sleep(1.0)  
-        
-        # RESETAR controle
         stop_monitoring = False
         
-        # INICIAR NOVA THREAD com ID único
         monitoring_thread = threading.Thread(
             target=monitor_whales, 
             args=(timeframe, multiple, ema_type, new_thread_id),
@@ -494,7 +677,7 @@ def start_monitoring():
         )
         monitoring_thread.start()
         
-        print(f"✅ THREAD {new_thread_id} INICIADA COM MÚLTIPLO {multiple} e EMA {ema_type}")
+        print(f"✅ Thread {new_thread_id} iniciada")
         return f"Monitoramento iniciado - Thread {new_thread_id}", 200
         
     except Exception as e:
@@ -505,16 +688,14 @@ def start_monitoring():
 def stop_monitoring_route():
     global stop_monitoring, monitoring_thread, thread_id, current_ema_type
     
-    print(f"🛑 COMANDO DE PARADA RECEBIDO")
-    
-    # Parar todas as threads
+    print("🛑 Parando monitoramento")
     stop_monitoring = True
-    thread_id += 1  # Invalidar todas as threads existentes
+    thread_id += 1
     
     monitoring_thread = None
     current_ema_type = None
     socketio.emit('monitoring_stopped', {'status': 'Parado'})
-    print(f"✅ MONITORAMENTO PARADO - Novo thread_id: {thread_id}")
+    print("✅ Monitoramento parado")
     
     return "Monitoramento parado.", 200
 
@@ -534,17 +715,15 @@ def handle_connect():
 def handle_disconnect():
     print('Cliente desconectado')
 
-# Adicionar rota de health check para Koyeb
 @app.route('/health')
 def health_check():
     return {'status': 'healthy', 'symbols': len(symbols)}, 200
 
 if __name__ == '__main__':
-    # Usar porta do ambiente ou padrão 8080
     port = int(os.environ.get('PORT', 8080))
-    print(f"Iniciando servidor Flask-SocketIO na porta {port}...")
+    print(f"🚀 Iniciando Whale Detector na porta {port}...")
+    print(f"📊 Símbolos carregados: {len(symbols)}")
     
-    # Em produção, não usar debug mode
     debug_mode = os.environ.get('FLASK_ENV', 'production') == 'development'
     
     socketio.run(
