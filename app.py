@@ -9,16 +9,16 @@ import threading
 import requests
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'whale_detector_secret'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'whale_detector_secret_production')
 
-# Configurar SocketIO com async_mode='threading' - MAIS ESTÁVEL
+# Configurar SocketIO com async_mode='threading' para produção
 socketio = SocketIO(
     app, 
     async_mode='threading',
     cors_allowed_origins="*",
     ping_timeout=60,
     ping_interval=25,
-    logger=True,
+    logger=False,
     engineio_logger=False
 )
 
@@ -36,11 +36,17 @@ try:
         exchange_info = client.get_exchange_info()
         symbols = [s['symbol'] for s in exchange_info['symbols'] 
                    if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING']
+        # Limitar para os 50 principais símbolos para performance
+        major_symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'ADAUSDT', 
+                        'XRPUSDT', 'DOTUSDT', 'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT',
+                        'LTCUSDT', 'LINKUSDT', 'ATOMUSDT', 'XLMUSDT', 'BCHUSDT',
+                        'FILUSDT', 'ETCUSDT', 'XTZUSDT', 'EOSUSDT', 'AAVEUSDT']
+        symbols = [s for s in symbols if s in major_symbols] or major_symbols
         print(f"✅ Carregados {len(symbols)} símbolos USDT para monitoramento.")
     else:
-        # Fallback para símbolos principais se Binance falhar
+        # Fallback para símbolos principais
         symbols = ['BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 
-                  'DOTUSDT', 'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT', 'LTCUSDT', 'LINKUSDT']
+                  'DOTUSDT', 'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT']
         print(f"⚠️ Usando {len(symbols)} símbolos principais (fallback)")
 except Exception as e:
     print(f"❌ Erro ao carregar símbolos: {e}")
@@ -49,11 +55,11 @@ except Exception as e:
 
 # Dicionário para intervalos de verificação otimizados
 timeframe_to_check_interval = {
-    '1m': 10,     # Verificar a cada 10 segundos para 1m
-    '3m': 15,     # Verificar a cada 15 segundos para 3m
-    '5m': 20,     # Verificar a cada 20 segundos para 5m
-    '15m': 30,    # Verificar a cada 30 segundos para 15m
-    '30m': 45,    # Verificar a cada 45 segundos para 30m
+    '1m': 15,     # Verificar a cada 15 segundos para 1m
+    '3m': 20,     # Verificar a cada 20 segundos para 3m
+    '5m': 25,     # Verificar a cada 25 segundos para 5m
+    '15m': 35,    # Verificar a cada 35 segundos para 15m
+    '30m': 50,    # Verificar a cada 50 segundos para 30m
     '1h': 60,     # Verificar a cada 60 segundos para 1h
     '2h': 120,    # Verificar a cada 120 segundos para 2h
     '4h': 180,    # Verificar a cada 180 segundos para 4h
@@ -342,7 +348,7 @@ def monitor_whales(timeframe, multiple, ema_type, my_thread_id):
         
         time.sleep(check_interval)
 
-# Template HTML simplificado
+# Template HTML
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -719,17 +725,24 @@ def handle_disconnect():
 def health_check():
     return {'status': 'healthy', 'symbols': len(symbols)}, 200
 
+# Para produção, usar Gunicorn
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8080))
+    port = int(os.environ.get('PORT', 8000))
     print(f"🚀 Iniciando Whale Detector na porta {port}...")
     print(f"📊 Símbolos carregados: {len(symbols)}")
     
     debug_mode = os.environ.get('FLASK_ENV', 'production') == 'development'
     
-    socketio.run(
-        app, 
-        debug=debug_mode, 
-        host='0.0.0.0', 
-        port=port, 
-        use_reloader=False
-    )
+    # Para desenvolvimento local apenas
+    if debug_mode:
+        socketio.run(
+            app, 
+            debug=True, 
+            host='0.0.0.0', 
+            port=port, 
+            use_reloader=False,
+            allow_unsafe_werkzeug=True
+        )
+    else:
+        # Em produção, usar Gunicorn
+        print("✅ Aplicação pronta para produção com Gunicorn")
