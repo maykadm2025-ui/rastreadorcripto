@@ -1,641 +1,641 @@
 <!DOCTYPE html>
-<html lang="pt-br">
+<html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mayk - Monitor Binance</title>
+    <title>Whale Detector Pro - Binance</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        :root {
-            --volume-color: #ff9800;
-            --rsi-color: #2196F3;
-            --ema-color: #4CAF50;
-            --macd-color: #9c27b0;
-            --bg-dark: #1a1a1a;
-            --bg-container: #2d2d2d;
-            --bg-input: #3d3d3d;
+        .alert-fade-in { animation: fadeIn 0.5s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+        .pulse-alert { animation: pulse 2s infinite; }
+        @keyframes pulse { 
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
         }
-        
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-            background-color: var(--bg-dark);
-            color: #ffffff;
-        }
-        .container {
-            background-color: var(--bg-container);
-            border-radius: 10px;
-            padding: 20px;
-            margin-bottom: 20px;
-        }
-        .controls {
-            display: flex;
-            gap: 15px;
-            align-items: center;
-            margin-bottom: 20px;
-            flex-wrap: wrap;
-        }
-        select, input, button {
-            padding: 8px 12px;
-            border: none;
-            border-radius: 5px;
-            background-color: var(--bg-input);
-            color: #ffffff;
-        }
-        button {
-            cursor: pointer;
-            transition: opacity 0.3s;
-        }
-        button:hover {
-            opacity: 0.9;
-        }
-        .btn-start {
-            background-color: #4CAF50;
-        }
-        .btn-stop {
-            background-color: #f44336;
-        }
-        .btn-filter {
-            background-color: #9c27b0;
-        }
-        .status {
-            padding: 10px;
-            border-radius: 5px;
-            margin-bottom: 20px;
-            text-align: center;
-            font-weight: bold;
-        }
-        .status.monitoring {
-            background-color: #2e7d32;
-        }
-        .status.stopped {
-            background-color: #d32f2f;
-        }
-        .alerts {
-            max-height: 500px;
-            overflow-y: auto;
-        }
-        .alert {
-            padding: 12px;
-            margin-bottom: 8px;
-            border-radius: 5px;
-            border: 3px solid transparent;
-            position: relative;
-            transition: all 0.3s ease;
-        }
-        
-        /* Animações de moldura intermitente */
-        @keyframes volumePulse {
-            0%, 100% { 
-                border-color: transparent; 
-                box-shadow: none; 
-            }
-            25% { 
-                border-color: var(--volume-color); 
-                box-shadow: 0 0 15px var(--volume-color); 
-            }
-            50% { 
-                border-color: transparent; 
-                box-shadow: none; 
-            }
-            75% { 
-                border-color: var(--volume-color); 
-                box-shadow: 0 0 20px var(--volume-color); 
-            }
-        }
-        
-        @keyframes rsiPulse {
-            0%, 100% { 
-                border-color: transparent; 
-                box-shadow: none; 
-            }
-            25% { 
-                border-color: var(--rsi-color); 
-                box-shadow: 0 0 15px var(--rsi-color); 
-            }
-            50% { 
-                border-color: transparent; 
-                box-shadow: none; 
-            }
-            75% { 
-                border-color: var(--rsi-color); 
-                box-shadow: 0 0 20px var(--rsi-color); 
-            }
-        }
-        
-        @keyframes emaPulse {
-            0%, 100% { 
-                border-color: transparent; 
-                box-shadow: none; 
-            }
-            25% { 
-                border-color: var(--ema-color); 
-                box-shadow: 0 0 15px var(--ema-color); 
-            }
-            50% { 
-                border-color: transparent; 
-                box-shadow: none; 
-            }
-            75% { 
-                border-color: var(--ema-color); 
-                box-shadow: 0 0 20px var(--ema-color); 
-            }
-        }
-        
-        @keyframes macdPulse {
-            0%, 100% { 
-                border-color: transparent; 
-                box-shadow: none; 
-            }
-            25% { 
-                border-color: var(--macd-color); 
-                box-shadow: 0 0 15px var(--macd-color); 
-            }
-            50% { 
-                border-color: transparent; 
-                box-shadow: none; 
-            }
-            75% { 
-                border-color: var(--macd-color); 
-                box-shadow: 0 0 20px var(--macd-color); 
-            }
-        }
-        
-        /* Classes para alertas com animação */
-        .alert.volume.pulsing {
-            animation: volumePulse 2s ease-in-out infinite;
-            background-color: rgba(255, 152, 0, 0.2);
-        }
-        
-        .alert.rsi.pulsing {
-            animation: rsiPulse 2s ease-in-out infinite;
-            background-color: rgba(33, 150, 243, 0.2);
-        }
-        
-        .alert.ema.pulsing {
-            animation: emaPulse 2s ease-in-out infinite;
-            background-color: rgba(76, 175, 80, 0.2);
-        }
-        
-        .alert.macd.pulsing {
-            animation: macdPulse 2s ease-in-out infinite;
-            background-color: rgba(156, 39, 176, 0.2);
-        }
-        
-        /* Estilos base dos alertas (sem animação) */
-        .alert.volume:not(.pulsing) {
-            background-color: rgba(255, 152, 0, 0.2);
-            border-left: 5px solid var(--volume-color);
-            color: #ffd54f;
-        }
-        .alert.rsi:not(.pulsing) {
-            background-color: rgba(33, 150, 243, 0.2);
-            border-left: 5px solid var(--rsi-color);
-            color: #64b5f6;
-        }
-        .alert.ema:not(.pulsing) {
-            background-color: rgba(76, 175, 80, 0.2);
-            border-left: 5px solid var(--ema-color);
-            color: #81c784;
-        }
-        .alert.macd:not(.pulsing) {
-            background-color: rgba(156, 39, 176, 0.2);
-            border-left: 5px solid var(--macd-color);
-            color: #ba68c8;
-        }
-        
-        .alert-header {
-            font-weight: bold;
-            font-size: 1.1em;
-            margin-bottom: 5px;
-        }
-        .alert-details {
-            font-size: 0.9em;
-            opacity: 0.8;
-        }
-        .filters {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 15px;
-            flex-wrap: wrap;
-        }
-        .filter-btn {
-            padding: 6px 12px;
-            border-radius: 20px;
-            cursor: pointer;
-            opacity: 0.7;
-            transition: all 0.3s;
-        }
-        .filter-btn.active {
-            opacity: 1;
-            transform: scale(1.05);
-        }
-        .filter-volume {
-            background-color: var(--volume-color);
-        }
-        .filter-rsi {
-            background-color: var(--rsi-color);
-        }
-        .filter-ema {
-            background-color: var(--ema-color);
-        }
-        .filter-macd {
-            background-color: var(--macd-color);
-        }
-        .stats {
-            display: flex;
-            gap: 15px;
-            margin-bottom: 15px;
-        }
-        .stat-box {
-            padding: 10px;
-            border-radius: 5px;
-            text-align: center;
-            flex: 1;
-        }
-        .stat-volume {
-            background-color: rgba(255, 152, 0, 0.3);
-        }
-        .stat-rsi {
-            background-color: rgba(33, 150, 243, 0.3);
-        }
-        .stat-ema {
-            background-color: rgba(76, 175, 80, 0.3);
-        }
-        .stat-macd {
-            background-color: rgba(156, 39, 176, 0.3);
-        }
-        .stat-count {
-            font-size: 1.5em;
-            font-weight: bold;
-        }
-        .system-message {
-            background-color: #757575;
-            color: white;
-            padding: 8px;
-            margin-bottom: 5px;
-            border-radius: 3px;
-            font-size: 0.9em;
-        }
-        .ema-config {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        
-        /* Efeito de entrada para novos alertas */
-        .alert.new-alert {
-            transform: scale(1.02);
-        }
-        
-        @media (max-width: 768px) {
-            .controls {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-        }
+        .gradient-bg { background: linear-gradient(135deg, #1a202c 0%, #2d3748 100%); }
+        .glass-effect { background: rgba(255, 255, 255, 0.1); backdrop-filter: blur(10px); }
     </style>
 </head>
-<body>
-    <h1>🐋 Mayk - BINANCE</h1>
-    
-    <div class="container">
-        <form id="monitoringForm">
-            <div class="controls">
-                <label>Timeframe:</label>
-                <select id="timeframe" name="timeframe">
-                    {% for tf in timeframes %}
-                    <option value="{{ tf }}" {% if tf == '5m' %}selected{% endif %}>{{ tf }}</option>
-                    {% endfor %}
-                </select>
-                
-                <label>Múltiplo:</label>
-                <input type="number" id="multiple" name="multiple" value="3" min="1" max="50" step="0.1">
-                
-                <div class="ema-config">
-                    <label>EMA:</label>
-                    <select id="ema_type" name="ema_type">
-                        {% for ema_key, ema_config in ema_configs.items() %}
-                        <option value="{{ ema_key }}">{{ ema_config.name }}</option>
+<body class="gradient-bg text-white min-h-screen">
+    <div class="container mx-auto px-4 py-6">
+        <!-- Header -->
+        <div class="text-center mb-8">
+            <h1 class="text-5xl font-bold bg-gradient-to-r from-green-400 to-blue-500 bg-clip-text text-transparent mb-3">
+                <i class="fas fa-whale mr-3"></i>Whale Detector Pro
+            </h1>
+            <p class="text-gray-300 text-lg">Monitoramento avançado em tempo real - Binance API</p>
+        </div>
+
+        <!-- Controls -->
+        <div class="glass-effect rounded-xl p-6 mb-8 border border-gray-700">
+            <h2 class="text-2xl font-bold text-white mb-4">
+                <i class="fas fa-cogs mr-2"></i>Configurações de Monitoramento
+            </h2>
+            <div class="grid grid-cols-1 lg:grid-cols-5 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">
+                        <i class="fas fa-chart-line mr-1"></i>Timeframe
+                    </label>
+                    <select id="timeframe" class="w-full bg-gray-800 border border-gray-600 rounded-lg px-3 py-2 text-white focus:ring-2 focus:ring-green-500">
+                        {% for tf, config in TIMEFRAME_CONFIG.items() %}
+                        <option value="{{ tf }}">{{ config.name }}</option>
                         {% endfor %}
                     </select>
                 </div>
                 
-                <button type="submit" class="btn-start">Iniciar Monitoramento</button>
-                <button type="button" onclick="stopMonitoring()" class="btn-stop">Parar</button>
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">
+                        <i class="fas fa-chart-bar mr-1"></i>Múltiplo Mínimo
+                    </label>
+                    <select id="multiple" class="w-full bg-gray-800 border border-gray-600 rounded-lg px-3 py-2 text-white focus:ring-2 focus:ring-green-500">
+                        <option value="2">2x</option>
+                        <option value="3" selected>3x</option>
+                        <option value="5">5x</option>
+                        <option value="8">8x</option>
+                        <option value="10">10x</option>
+                        <option value="15">15x</option>
+                        <option value="20">20x</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">
+                        <i class="fas fa-wave-square mr-1"></i>Configuração EMA
+                    </label>
+                    <select id="ema_type" class="w-full bg-gray-800 border border-gray-600 rounded-lg px-3 py-2 text-white focus:ring-2 focus:ring-green-500">
+                        {% for ema_key, ema_config in EMA_CONFIGS.items() %}
+                        <option value="{{ ema_key }}">{{ ema_config.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="lg:col-span-2 flex items-end space-x-3">
+                    <button id="startBtn" class="flex-1 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white font-bold py-3 px-6 rounded-lg transition-all duration-200 transform hover:scale-105">
+                        <i class="fas fa-play-circle mr-2"></i>Iniciar Monitoramento
+                    </button>
+                    <button id="stopBtn" class="flex-1 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white font-bold py-3 px-6 rounded-lg transition-all duration-200 transform hover:scale-105">
+                        <i class="fas fa-stop-circle mr-2"></i>Parar Tudo
+                    </button>
+                </div>
             </div>
-        </form>
-        
-        <div id="status" class="status stopped">
-            Status: Parado
         </div>
-    </div>
-    
-    <div class="container">
-        <h2>Estatísticas</h2>
-        <div class="stats">
-            <div class="stat-box stat-volume">
-                <div class="stat-count" id="volume-count">0</div>
-                <div>Alertas de Volume</div>
-                <div>DETECTOR DE BALEIAS</div>
-            </div>
-            <div class="stat-box stat-rsi">
-                <div class="stat-count" id="rsi-count">0</div>
-                <div>Alertas de RSI</div>
-                <div>PREÇOS MUITO BAIXO</div>
-            </div>
-            <div class="stat-box stat-ema">
-                <div class="stat-count" id="ema-count">0</div>
-                <div>Alertas de EMA</div>
-            </div>
-            <div class="stat-box stat-macd">
-                <div class="stat-count" id="macd-count">0</div>
-                <div>Alertas de MACD</div>
+
+        <!-- Status Panel -->
+        <div id="status" class="glass-effect rounded-xl p-6 mb-8 border border-gray-700 hidden">
+            <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between">
+                <div class="flex items-center mb-4 lg:mb-0">
+                    <div class="relative">
+                        <div class="absolute -inset-1 bg-green-500 rounded-full blur opacity-75 animate-pulse"></div>
+                        <div class="relative bg-green-600 rounded-full p-3">
+                            <i class="fas fa-broadcast-tower text-white text-xl"></i>
+                        </div>
+                    </div>
+                    <div class="ml-4">
+                        <h3 class="text-xl font-bold text-green-400">Monitoramento Ativo</h3>
+                        <p id="statusDetails" class="text-gray-300"></p>
+                    </div>
+                </div>
+                <div class="flex items-center space-x-6">
+                    <div id="connectionStatus" class="flex items-center text-green-400">
+                        <i class="fas fa-wifi text-2xl mr-2"></i>
+                        <span class="font-semibold">Conectado</span>
+                    </div>
+                    <div class="flex items-center text-blue-400">
+                        <i class="fas fa-microchip text-2xl mr-2"></i>
+                        <span id="threadStatus" class="font-semibold">-</span>
+                    </div>
+                </div>
             </div>
         </div>
-        
-        <h2>Filtros de Alertas</h2>
-        <div class="filters">
-            <div class="filter-btn filter-volume active" data-type="volume" onclick="toggleFilter('volume')">Volume</div>
-            <div class="filter-btn filter-rsi active" data-type="rsi" onclick="toggleFilter('rsi')">RSI</div>
-            <div class="filter-btn filter-ema active" data-type="ema" onclick="toggleFilter('ema')">EMA</div>
-            <div class="filter-btn filter-macd active" data-type="macd" onclick="toggleFilter('macd')">MACD</div>
-            <button class="btn-filter" onclick="clearAlerts()">Limpar Alertas</button>
+
+        <!-- Stats Dashboard -->
+        <div class="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-8">
+            <div class="glass-effect rounded-xl p-6 border border-gray-700 text-center transform hover:scale-105 transition duration-200">
+                <div class="text-3xl font-bold text-green-400 mb-2" id="totalSymbols">0</div>
+                <div class="text-gray-400 text-sm uppercase tracking-wider">Símbolos</div>
+                <div class="text-xs text-gray-500 mt-1">Ativos Monitorados</div>
+            </div>
+            <div class="glass-effect rounded-xl p-6 border border-gray-700 text-center transform hover:scale-105 transition duration-200">
+                <div class="text-3xl font-bold text-yellow-400 mb-2" id="volumeAlertsCount">0</div>
+                <div class="text-gray-400 text-sm uppercase tracking-wider">Volume</div>
+                <div class="text-xs text-gray-500 mt-1">Alertas de Whale</div>
+            </div>
+            <div class="glass-effect rounded-xl p-6 border border-gray-700 text-center transform hover:scale-105 transition duration-200">
+                <div class="text-3xl font-bold text-blue-400 mb-2" id="indicatorAlertsCount">0</div>
+                <div class="text-gray-400 text-sm uppercase tracking-wider">Indicadores</div>
+                <div class="text-xs text-gray-500 mt-1">Sinais Técnicos</div>
+            </div>
+            <div class="glass-effect rounded-xl p-6 border border-gray-700 text-center transform hover:scale-105 transition duration-200">
+                <div class="text-3xl font-bold text-purple-400 mb-2" id="lastUpdate">-</div>
+                <div class="text-gray-400 text-sm uppercase tracking-wider">Atualização</div>
+                <div class="text-xs text-gray-500 mt-1">Última Verificação</div>
+            </div>
         </div>
-        
-        <h2>Alertas 🚨</h2>
-        <div id="alerts" class="alerts">
-            <p>Aguardando alertas...</p>
+
+        <!-- Main Content -->
+        <div class="grid grid-cols-1 xl:grid-cols-3 gap-8">
+            <!-- Volume Alerts -->
+            <div class="xl:col-span-2">
+                <div class="glass-effect rounded-xl p-6 border border-gray-700 h-full">
+                    <div class="flex items-center justify-between mb-6">
+                        <h2 class="text-2xl font-bold text-yellow-400">
+                            <i class="fas fa-chart-bar mr-2"></i>Alertas de Volume
+                        </h2>
+                        <div class="flex items-center space-x-2">
+                            <span class="text-sm text-gray-400">Whales Detectados:</span>
+                            <span id="volumeAlertsLive" class="text-2xl font-bold text-yellow-400">0</span>
+                        </div>
+                    </div>
+                    <div id="volumeAlerts" class="space-y-4 max-h-[600px] overflow-y-auto pr-2">
+                        <div class="text-gray-500 text-center py-8">
+                            <i class="fas fa-search fa-3x mb-4 opacity-50"></i>
+                            <p class="text-lg">Aguardando detecção de whales...</p>
+                            <p class="text-sm text-gray-400 mt-2">Volume anômalo será exibido aqui</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Indicator Alerts -->
+            <div class="xl:col-span-1">
+                <div class="glass-effect rounded-xl p-6 border border-gray-700 h-full">
+                    <div class="flex items-center justify-between mb-6">
+                        <h2 class="text-2xl font-bold text-blue-400">
+                            <i class="fas fa-chart-line mr-2"></i>Sinais Técnicos
+                        </h2>
+                        <div class="flex items-center space-x-2">
+                            <span class="text-sm text-gray-400">Sinais:</span>
+                            <span id="indicatorAlertsLive" class="text-2xl font-bold text-blue-400">0</span>
+                        </div>
+                    </div>
+                    <div id="indicatorAlerts" class="space-y-4 max-h-[600px] overflow-y-auto pr-2">
+                        <div class="text-gray-500 text-center py-8">
+                            <i class="fas fa-wave-square fa-3x mb-4 opacity-50"></i>
+                            <p class="text-lg">Aguardando sinais técnicos...</p>
+                            <p class="text-sm text-gray-400 mt-2">RSI, EMA e MACD serão exibidos aqui</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Advanced Stats -->
+        <div class="glass-effect rounded-xl p-6 border border-gray-700 mt-8">
+            <h2 class="text-2xl font-bold text-white mb-6">
+                <i class="fas fa-chart-pie mr-2"></i>Estatísticas Avançadas
+            </h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                <div class="text-center">
+                    <div class="text-2xl font-bold text-green-400" id="totalCycles">0</div>
+                    <div class="text-gray-400 text-sm">Ciclos Concluídos</div>
+                </div>
+                <div class="text-center">
+                    <div class="text-2xl font-bold text-blue-400" id="totalProcessed">0</div>
+                    <div class="text-gray-400 text-sm">Símbolos Processados</div>
+                </div>
+                <div class="text-center">
+                    <div class="text-2xl font-bold text-yellow-400" id="totalVolumeAlerts">0</div>
+                    <div class="text-gray-400 text-sm">Total Alertas Volume</div>
+                </div>
+                <div class="text-center">
+                    <div class="text-2xl font-bold text-purple-400" id="totalIndicatorAlerts">0</div>
+                    <div class="text-gray-400 text-sm">Total Alertas Indicadores</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Alert History -->
+        <div class="glass-effect rounded-xl p-6 border border-gray-700 mt-8">
+            <h2 class="text-2xl font-bold text-white mb-6">
+                <i class="fas fa-history mr-2"></i>Histórico de Alertas
+            </h2>
+            <div class="flex space-x-4 mb-4">
+                <button id="showAllAlerts" class="px-4 py-2 bg-blue-600 rounded-lg text-white font-semibold">Todos</button>
+                <button id="showVolumeAlerts" class="px-4 py-2 bg-yellow-600 rounded-lg text-white font-semibold">Volume</button>
+                <button id="showIndicatorAlerts" class="px-4 py-2 bg-green-600 rounded-lg text-white font-semibold">Indicadores</button>
+            </div>
+            <div id="alertHistory" class="max-h-96 overflow-y-auto space-y-3">
+                <div class="text-gray-500 text-center py-8">
+                    <i class="fas fa-clock fa-3x mb-4 opacity-50"></i>
+                    <p>Histórico de alertas aparecerá aqui</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="text-center mt-12 text-gray-500">
+            <p>Whale Detector Pro &copy; 2024 - Monitoramento em tempo real da Binance</p>
+            <p class="text-sm mt-2">Desenvolvido para análise técnica avançada e detecção de whales</p>
         </div>
     </div>
 
     <script>
         const socket = io();
-        let alertCount = {
-            volume: 0,
-            rsi: 0,
-            ema: 0,
-            macd: 0
+        let volumeAlertCount = 0;
+        let indicatorAlertCount = 0;
+        let totalVolumeAlerts = 0;
+        let totalIndicatorAlerts = 0;
+        let alertHistory = [];
+
+        // Elements
+        const elements = {
+            startBtn: document.getElementById('startBtn'),
+            stopBtn: document.getElementById('stopBtn'),
+            statusDiv: document.getElementById('status'),
+            statusDetails: document.getElementById('statusDetails'),
+            volumeAlertsDiv: document.getElementById('volumeAlerts'),
+            indicatorAlertsDiv: document.getElementById('indicatorAlerts'),
+            volumeAlertsLive: document.getElementById('volumeAlertsLive'),
+            indicatorAlertsLive: document.getElementById('indicatorAlertsLive'),
+            totalSymbolsSpan: document.getElementById('totalSymbols'),
+            volumeAlertsCountSpan: document.getElementById('volumeAlertsCount'),
+            indicatorAlertsCountSpan: document.getElementById('indicatorAlertsCount'),
+            lastUpdateSpan: document.getElementById('lastUpdate'),
+            totalCyclesSpan: document.getElementById('totalCycles'),
+            totalProcessedSpan: document.getElementById('totalProcessed'),
+            totalVolumeAlertsSpan: document.getElementById('totalVolumeAlerts'),
+            totalIndicatorAlertsSpan: document.getElementById('totalIndicatorAlerts'),
+            alertHistoryDiv: document.getElementById('alertHistory'),
+            threadStatus: document.getElementById('threadStatus')
         };
-        let activeFilters = {
-            volume: true,
-            rsi: true,
-            ema: true,
-            macd: true
-        };
-        
-        // Elementos DOM
-        const statusDiv = document.getElementById('status');
-        const alertsDiv = document.getElementById('alerts');
-        const form = document.getElementById('monitoringForm');
-        const volumeCount = document.getElementById('volume-count');
-        const rsiCount = document.getElementById('rsi-count');
-        const emaCount = document.getElementById('ema-count');
-        const macdCount = document.getElementById('macd-count');
-        
-        // Conexão WebSocket
-        socket.on('connect', function() {
-            console.log('Conectado ao servidor');
-            addSystemMessage('Conectado ao servidor ✅');
-        });
-        
-        socket.on('disconnect', function() {
-            console.log('Desconectado do servidor');
-            addSystemMessage('Desconectado do servidor ❌');
-        });
-        
-        socket.on('monitoring_started', function(data) {
-            let statusText = `Status: Monitorando (${data.timeframe}, ${data.multiple}x)`;
-            if (data.ema_name) {
-                statusText += `, ${data.ema_name}`;
-            }
-            statusDiv.textContent = statusText;
-            statusDiv.className = 'status monitoring';
-            addSystemMessage(`Monitoramento iniciado: ${data.timeframe}, múltiplo ${data.multiple}x${data.ema_name ? ', ' + data.ema_name : ''}`);
-        });
-        
-        socket.on('monitoring_stopped', function(data) {
-            statusDiv.textContent = 'Status: Parado';
-            statusDiv.className = 'status stopped';
-            addSystemMessage('Monitoramento parado');
-        });
-        
-        socket.on('whale_alert', function(alert) {
-            alertCount.volume++;
-            volumeCount.textContent = alertCount.volume;
-            
-            const alertElement = createAlertElement('volume', alert, 
-                `🐋 ${alert.crypto} - ${alert.multiple}x BALEIA DETECTADA!`,
-                `Volume atual: ${formatNumber(alert.volume)} | Média (20): ${formatNumber(alert.avg_volume)} | Timeframe: ${alert.timeframe} | ${alert.timestamp}`
-            );
-            
-            addAlertToDOM(alertElement);
-            
-            // Notificação do navegador
-            if (Notification.permission === 'granted') {
-                new Notification(`Whale Alert: ${alert.crypto}`, {
-                    body: `${alert.multiple}x volume detectado!`,
-                    icon: '/favicon.ico'
-                });
-            }
-        });
-        
-        socket.on('indicator_alert', function(alert) {
-            if (alert.type === 'RSI') {
-                alertCount.rsi++;
-                rsiCount.textContent = alertCount.rsi;
-                
-                const alertElement = createAlertElement('rsi', alert,
-                    `📈 ${alert.crypto} - RSI ${alert.current_rsi}`,
-                    `RSI anterior: ${alert.previous_rsi} | Cruzou de baixo para cima | Timeframe: ${alert.timeframe} | ${alert.timestamp}`
-                );
-                
-                addAlertToDOM(alertElement);
-                
-                if (Notification.permission === 'granted') {
-                    new Notification(`RSI Alert: ${alert.crypto}`, {
-                        body: `RSI ${alert.current_rsi} - Sinal de compra`,
-                        icon: '/favicon.ico'
-                    });
-                }
-            } else if (alert.type === 'EMA') {
-                alertCount.ema++;
-                emaCount.textContent = alertCount.ema;
-                
-                const emaConfig = alert.ema_name || 'EMA Crossover';
-                const alertElement = createAlertElement('ema', alert,
-                    `📊 ${alert.crypto} - ${emaConfig}`,
-                    `EMA Rápida: ${alert.current_ema_fast} > EMA Lenta: ${alert.current_ema_slow} | Timeframe: ${alert.timeframe} | ${alert.timestamp}`
-                );
-                
-                addAlertToDOM(alertElement);
-                
-                if (Notification.permission === 'granted') {
-                    new Notification(`EMA Alert: ${alert.crypto}`, {
-                        body: `${emaConfig} - EMA rápida cruzou EMA lenta de baixo para cima`,
-                        icon: '/favicon.ico'
-                    });
-                }
-            } else if (alert.type === 'MACD') {
-                alertCount.macd++;
-                macdCount.textContent = alertCount.macd;
-                
-                const alertElement = createAlertElement('macd', alert,
-                    `📈 ${alert.crypto} - MACD Crossover`,
-                    `MACD: ${alert.current_macd} > Signal: ${alert.current_signal} | Cruzamento bullish | Timeframe: ${alert.timeframe} | ${alert.timestamp}`
-                );
-                
-                addAlertToDOM(alertElement);
-                
-                if (Notification.permission === 'granted') {
-                    new Notification(`MACD Alert: ${alert.crypto}`, {
-                        body: `MACD cruzou linha de sinal - Sinal de compra`,
-                        icon: '/favicon.ico'
-                    });
-                }
-            }
-        });
-        
-        // Funções auxiliares
-        function formatNumber(num) {
-            if (num >= 1000000) {
-                return (num / 1000000).toFixed(2) + 'M';
-            } else if (num >= 1000) {
-                return (num / 1000).toFixed(2) + 'K';
-            }
-            return num.toFixed(2);
-        }
-        
-        function createAlertElement(type, alert, header, details) {
-            const alertElement = document.createElement('div');
-            alertElement.className = `alert ${type} pulsing new-alert`;
-            alertElement.dataset.type = type;
-            alertElement.innerHTML = `
-                <div class="alert-header">${header}</div>
-                <div class="alert-details">${details}</div>
-            `;
-            
-            // Aplicar filtro
-            if (!activeFilters[type]) {
-                alertElement.style.display = 'none';
-            }
-            
-            // Remover a classe de animação pulsante após 10 segundos
-            setTimeout(() => {
-                alertElement.classList.remove('pulsing');
-            }, 10000);
-            
-            // Remover a classe new-alert após 2 segundos
-            setTimeout(() => {
-                alertElement.classList.remove('new-alert');
-            }, 2000);
-            
-            return alertElement;
-        }
-        
-        function addAlertToDOM(alertElement) {
-            // Remover mensagem de "Aguardando alertas" se existir
-            if (alertsDiv.children.length === 1 && alertsDiv.firstChild.tagName === 'P') {
-                alertsDiv.innerHTML = '';
-            }
-            
-            // Adicionar no topo
-            alertsDiv.insertBefore(alertElement, alertsDiv.firstChild);
-            
-            // Manter apenas os últimos 100 alertas
-            while (alertsDiv.children.length > 100) {
-                alertsDiv.removeChild(alertsDiv.lastChild);
-            }
-            
-            // Scroll para o topo
-            alertsDiv.scrollTop = 0;
-        }
-        
-        function addSystemMessage(message) {
-            const messageElement = document.createElement('div');
-            messageElement.className = 'system-message';
-            messageElement.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-            
-            // Remover mensagem de "Aguardando alertas" se existir
-            if (alertsDiv.children.length === 1 && alertsDiv.firstChild.tagName === 'P') {
-                alertsDiv.innerHTML = '';
-            }
-            
-            alertsDiv.insertBefore(messageElement, alertsDiv.firstChild);
-            
-            // Manter apenas os últimos 100 alertas
-            while (alertsDiv.children.length > 100) {
-                alertsDiv.removeChild(alertsDiv.lastChild);
-            }
-        }
-        
-        function toggleFilter(type) {
-            activeFilters[type] = !activeFilters[type];
-            const filterBtn = document.querySelector(`.filter-btn[data-type="${type}"]`);
-            
-            if (activeFilters[type]) {
-                filterBtn.classList.add('active');
-            } else {
-                filterBtn.classList.remove('active');
-            }
-            
-            // Aplicar filtro a todos os alertas
-            const alerts = document.querySelectorAll('.alert');
-            alerts.forEach(alert => {
-                const alertType = alert.dataset.type;
-                if (alertType) {
-                    alert.style.display = activeFilters[alertType] ? 'block' : 'none';
-                }
-            });
-        }
-        
-        function clearAlerts() {
-            alertsDiv.innerHTML = '<p>Aguardando alertas...</p>';
-            alertCount = { volume: 0, rsi: 0, ema: 0, macd: 0 };
-            volumeCount.textContent = '0';
-            rsiCount.textContent = '0';
-            emaCount.textContent = '0';
-            macdCount.textContent = '0';
-        }
-        
-        // Formulário de monitoramento
-        form.addEventListener('submit', function(e) {
-            e.preventDefault();
-            const formData = new FormData(form);
-            
+
+        // Start monitoring
+        elements.startBtn.addEventListener('click', () => {
+            const timeframe = document.getElementById('timeframe').value;
+            const multiple = document.getElementById('multiple').value;
+            const emaType = document.getElementById('ema_type').value;
+
             fetch('/start_monitoring', {
                 method: 'POST',
-                body: formData
-            })
-            .then(response => response.text())
-            .then(data => {
-                console.log('Resposta:', data);
-            })
-            .catch(error => {
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: `timeframe=${timeframe}&multiple=${multiple}&ema_type=${emaType}`
+            }).then(response => response.text()).then(data => {
+                console.log('Monitoramento iniciado:', data);
+                showNotification('Monitoramento iniciado!', 'success');
+            }).catch(error => {
                 console.error('Erro:', error);
-                addSystemMessage('Erro ao iniciar monitoramento: ' + error);
+                showNotification('Erro ao iniciar monitoramento', 'error');
             });
         });
-        
-        function stopMonitoring() {
-            fetch('/stop_monitoring', {
-                method: 'POST'
-            })
+
+        // Stop monitoring
+        elements.stopBtn.addEventListener('click', () => {
+            fetch('/stop_monitoring', {method: 'POST'})
             .then(response => response.text())
             .then(data => {
-                console.log('Monitoramento parado:', data);
+                console.log('Parado:', data);
+                showNotification('Monitoramento parado!', 'warning');
             })
             .catch(error => {
                 console.error('Erro:', error);
+                showNotification('Erro ao parar monitoramento', 'error');
+            });
+        });
+
+        // Filter alerts
+        document.getElementById('showAllAlerts').addEventListener('click', () => filterAlerts('all'));
+        document.getElementById('showVolumeAlerts').addEventListener('click', () => filterAlerts('volume'));
+        document.getElementById('showIndicatorAlerts').addEventListener('click', () => filterAlerts('indicator'));
+
+        // Socket event handlers
+        socket.on('connect', () => {
+            console.log('Conectado ao servidor');
+            updateConnectionStatus(true);
+        });
+
+        socket.on('disconnect', () => {
+            console.log('Desconectado do servidor');
+            updateConnectionStatus(false);
+        });
+
+        socket.on('monitoring_started', (data) => {
+            showStatus(data);
+            elements.threadStatus.textContent = `Thread ${data.thread_id}`;
+            showNotification(`Monitoramento iniciado: ${data.timeframe} ${data.multiple}x`, 'success');
+        });
+
+        socket.on('monitoring_stopped', (data) => {
+            hideStatus();
+            elements.threadStatus.textContent = '-';
+            showNotification('Monitoramento parado', 'warning');
+        });
+
+        socket.on('whale_alert', (alert) => {
+            volumeAlertCount++;
+            totalVolumeAlerts++;
+            addVolumeAlert(alert);
+            addToHistory(alert, 'volume');
+            updateStats();
+            playNotificationSound();
+            showNotification(`🚨 Volume ${alert.crypto}: ${alert.multiple}x`, 'warning');
+        });
+
+        socket.on('indicator_alert', (alert) => {
+            indicatorAlertCount++;
+            totalIndicatorAlerts++;
+            addIndicatorAlert(alert);
+            addToHistory(alert, 'indicator');
+            updateStats();
+            playNotificationSound();
+            
+            let message = `📈 ${alert.type} ${alert.crypto}`;
+            if (alert.type.includes('RSI')) {
+                message = `📊 RSI ${alert.crypto}: ${alert.current_rsi}`;
+            }
+            showNotification(message, 'info');
+        });
+
+        socket.on('stats_update', (data) => {
+            updateAdvancedStats(data);
+        });
+
+        socket.on('current_status', (data) => {
+            if (data.monitoring) {
+                showStatus(data);
+                elements.threadStatus.textContent = `Thread ${data.current_thread_id}`;
+            }
+        });
+
+        // Helper functions
+        function showStatus(data) {
+            elements.statusDiv.classList.remove('hidden');
+            elements.statusDetails.innerHTML = `
+                <strong>Timeframe:</strong> ${data.timeframe} | 
+                <strong>Múltiplo:</strong> ${data.multiple}x | 
+                <strong>EMA:</strong> ${data.ema_name} |
+                <strong>Símbolos:</strong> ${data.total_symbols}
+            `;
+        }
+
+        function hideStatus() {
+            elements.statusDiv.classList.add('hidden');
+        }
+
+        function updateConnectionStatus(connected) {
+            const statusElement = document.getElementById('connectionStatus');
+            if (connected) {
+                statusElement.innerHTML = '<i class="fas fa-wifi text-2xl mr-2"></i><span class="font-semibold text-green-400">Conectado</span>';
+            } else {
+                statusElement.innerHTML = '<i class="fas fa-wifi text-2xl mr-2"></i><span class="font-semibold text-red-400">Desconectado</span>';
+            }
+        }
+
+        function addVolumeAlert(alert) {
+            const alertElement = createAlertElement(alert, 'volume');
+            
+            if (elements.volumeAlertsDiv.firstChild?.className?.includes('text-gray-500')) {
+                elements.volumeAlertsDiv.innerHTML = '';
+            }
+            elements.volumeAlertsDiv.insertBefore(alertElement, elements.volumeAlertsDiv.firstChild);
+
+            if (elements.volumeAlertsDiv.children.length > 15) {
+                elements.volumeAlertsDiv.removeChild(elements.volumeAlertsDiv.lastChild);
+            }
+            
+            elements.volumeAlertsLive.textContent = volumeAlertCount;
+        }
+
+        function addIndicatorAlert(alert) {
+            const alertElement = createAlertElement(alert, 'indicator');
+            
+            if (elements.indicatorAlertsDiv.firstChild?.className?.includes('text-gray-500')) {
+                elements.indicatorAlertsDiv.innerHTML = '';
+            }
+            elements.indicatorAlertsDiv.insertBefore(alertElement, elements.indicatorAlertsDiv.firstChild);
+
+            if (elements.indicatorAlertsDiv.children.length > 15) {
+                elements.indicatorAlertsDiv.removeChild(elements.indicatorAlertsDiv.lastChild);
+            }
+            
+            elements.indicatorAlertsLive.textContent = indicatorAlertCount;
+        }
+
+        function createAlertElement(alert, type) {
+            const isVolume = type === 'volume';
+            const color = alert.color || (isVolume ? 'yellow' : 
+                          alert.type.includes('GOLDEN') || alert.type.includes('BULLISH') ? 'green' : 
+                          alert.type.includes('OVERSOLD') ? 'green' : 'red');
+            
+            const alertElement = document.createElement('div');
+            alertElement.className = `alert-fade-in pulse-alert bg-${color}-900 border-l-4 border-${color}-500 p-4 rounded-lg`;
+            
+            let content = '';
+            
+            if (isVolume) {
+                content = `
+                    <div class="flex justify-between items-start">
+                        <div class="flex-1">
+                            <div class="flex items-center mb-2">
+                                <div class="font-bold text-${color}-300 text-xl mr-3">${alert.crypto}</div>
+                                <span class="bg-${color}-600 text-white px-2 py-1 rounded text-sm font-bold">${alert.multiple}x</span>
+                            </div>
+                            <div class="text-${color}-200 text-sm mb-1">Volume: ${formatNumber(alert.volume)}</div>
+                            <div class="text-gray-300 text-xs">Média: ${formatNumber(alert.avg_volume)} | Preço: $${alert.price}</div>
+                            <div class="text-${alert.price_change >= 0 ? 'green' : 'red'}-400 text-xs font-bold mt-1">
+                                ${alert.price_change >= 0 ? '↗' : '↘'} ${alert.price_change}%
+                            </div>
+                        </div>
+                        <div class="text-right ml-4">
+                            <div class="text-${color}-400 font-bold text-lg">${alert.multiple}x</div>
+                            <div class="text-gray-400 text-xs mt-1">${alert.timestamp.split(' ')[1]}</div>
+                        </div>
+                    </div>
+                    <div class="text-gray-400 text-xs mt-2 flex justify-between">
+                        <span>${alert.timeframe_name}</span>
+                        <span>WHALE DETECTED</span>
+                    </div>
+                `;
+            } else {
+                let details = '';
+                if (alert.type.includes('RSI')) {
+                    details = `RSI: ${alert.previous_rsi} → ${alert.current_rsi}`;
+                } else if (alert.type.includes('EMA')) {
+                    details = `${alert.ema_name}`;
+                } else if (alert.type.includes('MACD')) {
+                    details = `MACD: ${alert.macd_line?.toFixed(4) || ''}`;
+                }
+                
+                content = `
+                    <div class="flex justify-between items-start">
+                        <div class="flex-1">
+                            <div class="flex items-center mb-2">
+                                <div class="font-bold text-${color}-300 text-xl mr-3">${alert.crypto}</div>
+                                <span class="bg-${color}-600 text-white px-2 py-1 rounded text-sm font-bold">${alert.type.replace(/_/g, ' ')}</span>
+                            </div>
+                            <div class="text-${color}-200 text-sm mb-1">${alert.type.replace(/_/g, ' ')}</div>
+                            <div class="text-gray-300 text-xs">${details}</div>
+                            ${alert.ema_name ? `<div class="text-gray-400 text-xs mt-1">${alert.ema_name}</div>` : ''}
+                        </div>
+                        <div class="text-right ml-4">
+                            <div class="text-${color}-400 font-bold text-lg">${alert.type.split('_')[0]}</div>
+                            <div class="text-gray-400 text-xs mt-1">${alert.timestamp.split(' ')[1]}</div>
+                        </div>
+                    </div>
+                    <div class="text-gray-400 text-xs mt-2">${alert.timeframe_name}</div>
+                `;
+            }
+            
+            alertElement.innerHTML = content;
+            return alertElement;
+        }
+
+        function addToHistory(alert, type) {
+            alert.historyType = type;
+            alert.historyId = Date.now();
+            alertHistory.unshift(alert);
+            
+            if (alertHistory.length > 50) {
+                alertHistory = alertHistory.slice(0, 50);
+            }
+            
+            updateAlertHistory();
+        }
+
+        function updateAlertHistory() {
+            elements.alertHistoryDiv.innerHTML = '';
+            
+            if (alertHistory.length === 0) {
+                elements.alertHistoryDiv.innerHTML = `
+                    <div class="text-gray-500 text-center py-8">
+                        <i class="fas fa-clock fa-3x mb-4 opacity-50"></i>
+                        <p>Nenhum alerta no histórico</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            alertHistory.forEach(alert => {
+                const historyElement = document.createElement('div');
+                historyElement.className = `bg-gray-800 border-l-4 border-${alert.color}-500 p-3 rounded mb-2`;
+                
+                const time = alert.timestamp.split(' ')[1];
+                const type = alert.historyType === 'volume' ? '📊 Volume' : '📈 Indicador';
+                
+                historyElement.innerHTML = `
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <span class="font-bold text-white">${alert.crypto}</span>
+                            <span class="text-sm text-gray-400 ml-2">${type}</span>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-xs text-gray-400">${time}</div>
+                            <div class="text-xs text-gray-500">${alert.timeframe}</div>
+                        </div>
+                    </div>
+                    ${alert.multiple ? `<div class="text-yellow-400 text-sm mt-1">${alert.multiple}x volume</div>` : ''}
+                    ${alert.current_rsi ? `<div class="text-green-400 text-sm mt-1">RSI: ${alert.current_rsi}</div>` : ''}
+                `;
+                
+                elements.alertHistoryDiv.appendChild(historyElement);
             });
         }
-        
-        // Solicitar permissão para notificações
-        if ('Notification' in window && Notification.permission === 'default') {
-            Notification.requestPermission();
+
+        function filterAlerts(filter) {
+            // Implementação simplificada - na prática você filtraria o alertHistory
+            updateAlertHistory(); // Recarrega com todos por enquanto
         }
+
+        function formatNumber(num) {
+            if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
+            if (num >= 1000) return (num / 1000).toFixed(2) + 'K';
+            return num?.toFixed(2) || '0';
+        }
+
+        function updateStats() {
+            elements.volumeAlertsCountSpan.textContent = volumeAlertCount;
+            elements.indicatorAlertsCountSpan.textContent = indicatorAlertCount;
+            elements.lastUpdateSpan.textContent = new Date().toLocaleTimeString();
+        }
+
+        function updateAdvancedStats(data) {
+            elements.totalCyclesSpan.textContent = data.cycle;
+            elements.totalProcessedSpan.textContent = data.processed;
+            elements.totalVolumeAlertsSpan.textContent = data.total_alerts.volume_alerts;
+            elements.totalIndicatorAlertsSpan.textContent = 
+                data.total_alerts.rsi_alerts + data.total_alerts.ema_alerts + data.total_alerts.macd_alerts;
+        }
+
+        function playNotificationSound() {
+            // Som de notificação simples
+            try {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+                
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                
+                oscillator.frequency.value = 800;
+                oscillator.type = 'sine';
+                
+                gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+                
+                oscillator.start(audioContext.currentTime);
+                oscillator.stop(audioContext.currentTime + 0.5);
+            } catch (e) {
+                console.log('Audio não suportado');
+            }
+        }
+
+        function showNotification(message, type) {
+            // Criar notificação toast
+            const toast = document.createElement('div');
+            toast.className = `fixed top-4 right-4 p-4 rounded-lg shadow-lg z-50 transform translate-x-full transition-transform duration-300 ${
+                type === 'success' ? 'bg-green-600' : 
+                type === 'error' ? 'bg-red-600' : 
+                type === 'warning' ? 'bg-yellow-600' : 'bg-blue-600'
+            } text-white`;
+            toast.textContent = message;
+            
+            document.body.appendChild(toast);
+            
+            // Animar entrada
+            setTimeout(() => {
+                toast.style.transform = 'translateX(0)';
+            }, 100);
+            
+            // Remover após 3 segundos
+            setTimeout(() => {
+                toast.style.transform = 'translateX(100%)';
+                setTimeout(() => {
+                    document.body.removeChild(toast);
+                }, 300);
+            }, 3000);
+        }
+
+        // Initial setup
+        updateStats();
+        
+        // Load initial stats
+        fetch('/status')
+            .then(response => response.json())
+            .then(data => {
+                elements.totalSymbolsSpan.textContent = data.total_symbols;
+                if (data.monitoring_active) {
+                    showStatus(data);
+                    elements.threadStatus.textContent = `Thread ${data.current_thread_id}`;
+                }
+            })
+            .catch(error => {
+                console.error('Erro ao carregar status:', error);
+            });
+
+        // Load alert history
+        fetch('/alert_history')
+            .then(response => response.json())
+            .then(data => {
+                alertHistory = data.history || [];
+                updateAlertHistory();
+            })
+            .catch(error => {
+                console.error('Erro ao carregar histórico:', error);
+            });
     </script>
 </body>
 </html>

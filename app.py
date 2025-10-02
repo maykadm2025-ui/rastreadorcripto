@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
 from binance.client import Client
 import time
@@ -7,11 +7,18 @@ from datetime import datetime
 import math
 import threading
 import requests
+import json
+import logging
+from typing import List, Dict, Tuple, Optional
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'whale_detector_secret_production')
+# Configuração de logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# Configurar SocketIO com async_mode='threading' para produção
+app = Flask(__name__, template_folder='templates')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'whale_detector_secret_production_2024')
+
+# Configurar SocketIO para produção
 socketio = SocketIO(
     app, 
     async_mode='threading',
@@ -19,629 +26,651 @@ socketio = SocketIO(
     ping_timeout=60,
     ping_interval=25,
     logger=False,
-    engineio_logger=False
+    engineio_logger=False,
+    max_http_buffer_size=1e8
 )
 
-# Inicializar cliente Binance com tratamento de erro
+# Inicializar cliente Binance com configurações robustas
 try:
     client = Client()
-    print("✅ Cliente Binance inicializado com sucesso")
+    logger.info("✅ Cliente Binance inicializado com sucesso")
 except Exception as e:
-    print(f"❌ Erro ao inicializar cliente Binance: {e}")
+    logger.error(f"❌ Erro ao inicializar cliente Binance: {e}")
     client = None
 
-# Obter símbolos USDT - com fallback
-try:
-    if client:
+def get_trading_symbols() -> List[str]:
+    """Obtém TODOS os símbolos de trading USDT disponíveis da API Binance"""
+    all_symbols = []
+    
+    if not client:
+        logger.error("❌ Cliente Binance não disponível")
+        return []
+    
+    try:
+        logger.info("🔧 Obtendo símbolos da API Binance...")
         exchange_info = client.get_exchange_info()
-        symbols = [s['symbol'] for s in exchange_info['symbols'] 
-                   if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING']
-        # Limitar para os 50 principais símbolos para performance
-        major_symbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'ADAUSDT', 
-                        'XRPUSDT', 'DOTUSDT', 'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT',
-                        'LTCUSDT', 'LINKUSDT', 'ATOMUSDT', 'XLMUSDT', 'BCHUSDT',
-                        'FILUSDT', 'ETCUSDT', 'XTZUSDT', 'EOSUSDT', 'AAVEUSDT']
-        symbols = [s for s in symbols if s in major_symbols] or major_symbols
-        print(f"✅ Carregados {len(symbols)} símbolos USDT para monitoramento.")
-    else:
-        # Fallback para símbolos principais
-        symbols = ['BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 
-                  'DOTUSDT', 'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT']
-        print(f"⚠️ Usando {len(symbols)} símbolos principais (fallback)")
-except Exception as e:
-    print(f"❌ Erro ao carregar símbolos: {e}")
-    symbols = ['BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'BNBUSDT', 'SOLUSDT']
-    print(f"⚠️ Usando {len(symbols)} símbolos básicos (fallback de emergência)")
+        
+        if not exchange_info or 'symbols' not in exchange_info:
+            logger.error("❌ Resposta inválida da API Binance")
+            return []
+        
+        logger.info(f"📦 Total de símbolos na Binance: {len(exchange_info['symbols'])}")
+        
+        # Filtrar símbolos USDT em trading
+        for symbol_info in exchange_info['symbols']:
+            try:
+                quote_asset = symbol_info.get('quoteAsset', '')
+                status = symbol_info.get('status', '')
+                symbol = symbol_info.get('symbol', '')
+                
+                # Filtro: apenas USDT, em TRADING, excluindo alavancados
+                if (quote_asset == 'USDT' and 
+                    status == 'TRADING' and
+                    not symbol.endswith(('UPUSDT', 'DOWNUSDT', 'BULLUSDT', 'BEARUSDT'))):
+                    all_symbols.append(symbol)
+                    
+            except Exception as e:
+                logger.debug(f"Erro ao processar símbolo {symbol_info.get('symbol', 'UNKNOWN')}: {e}")
+                continue
+        
+        logger.info(f"✅ API Binance: {len(all_symbols)} símbolos USDT encontrados")
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao obter símbolos da API Binance: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return []
+    
+    logger.info(f"🎯 Total de {len(all_symbols)} símbolos USDT carregados para monitoramento")
+    return all_symbols
 
-# Dicionário para intervalos de verificação otimizados
-timeframe_to_check_interval = {
-    '1m': 15,     # Verificar a cada 15 segundos para 1m
-    '3m': 20,     # Verificar a cada 20 segundos para 3m
-    '5m': 25,     # Verificar a cada 25 segundos para 5m
-    '15m': 35,    # Verificar a cada 35 segundos para 15m
-    '30m': 50,    # Verificar a cada 50 segundos para 30m
-    '1h': 60,     # Verificar a cada 60 segundos para 1h
-    '2h': 120,    # Verificar a cada 120 segundos para 2h
-    '4h': 180,    # Verificar a cada 180 segundos para 4h
-    '6h': 240,    # Verificar a cada 240 segundos para 6h
-    '8h': 300,    # Verificar a cada 300 segundos para 8h
-    '12h': 360,   # Verificar a cada 360 segundos para 12h
-    '1d': 600     # Verificar a cada 600 segundos para 1d
+# Configurações de timeframe
+TIMEFRAME_CONFIG = {
+    '1m': {'interval': 15, 'limit': 100, 'name': '1 Minuto'},
+    '3m': {'interval': 20, 'limit': 100, 'name': '3 Minutos'},
+    '5m': {'interval': 25, 'limit': 100, 'name': '5 Minutos'},
+    '15m': {'interval': 30, 'limit': 100, 'name': '15 Minutos'},
+    '30m': {'interval': 40, 'limit': 100, 'name': '30 Minutos'},
+    '1h': {'interval': 30, 'limit': 100, 'name': '1 Hora'},
+    '2h': {'interval': 70, 'limit': 100, 'name': '2 Horas'},
+    '4h': {'interval': 30, 'limit': 100, 'name': '4 Horas'},
+    '6h': {'interval': 130, 'limit': 100, 'name': '6 Horas'},
+    '8h': {'interval': 160, 'limit': 100, 'name': '8 Horas'},
+    '12h': {'interval': 200, 'limit': 100, 'name': '12 Horas'},
+    '1d': {'interval': 30, 'limit': 100, 'name': '1 Dia'}
 }
 
-# Configurações de EMA disponíveis
+# Configurações de EMA
 EMA_CONFIGS = {
     'ema_7_21': {'fast': 7, 'slow': 21, 'name': 'EMA 7x21 (Curto Prazo)'},
+    'ema_12_26': {'fast': 12, 'slow': 26, 'name': 'EMA 12x26 (MACD Base)'},
     'ema_20_50': {'fast': 20, 'slow': 50, 'name': 'EMA 20x50 (Swing Trade)'},
     'ema_50_200': {'fast': 50, 'slow': 200, 'name': 'EMA 50x200 (Golden Cross)'}
 }
 
-# Variáveis globais para controle de thread
+# Configurações de RSI
+RSI_CONFIG = {
+    'oversold': 30,
+    'overbought': 70,
+    'period': 14
+}
+
+# Variáveis globais para controle
 monitoring_thread = None
 stop_monitoring = False
 current_timeframe = None
 current_multiple = None
 current_ema_type = None
 thread_id = 0
-
-# Dicionário para acompanhar o último timestamp processado por símbolo
 last_processed = {}
+alert_history = []
+MAX_ALERT_HISTORY = 200
 
-def calculate_rsi(prices, period=14):
-    """Calcula o RSI - Versão simplificada e robusta"""
-    if len(prices) < period + 1:
-        return []
+# Estatísticas
+stats = {
+    'volume_alerts': 0,
+    'rsi_alerts': 0,
+    'ema_alerts': 0,
+    'macd_alerts': 0,
+    'total_cycles': 0,
+    'total_processed': 0,
+    'start_time': None
+}
+
+# Controle de rate limiting
+symbol_batches = []
+current_batch_index = 0
+BATCH_SIZE = 130  # Processar 130 símbolos por ciclo para não sobrecarregar a API
+
+# Controle de último RSI por símbolo
+last_rsi_values = {}
+
+class TechnicalAnalyzer:
+    """Classe para cálculos técnicos avançados"""
     
-    try:
-        deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
-        gains = [max(delta, 0) for delta in deltas]
-        losses = [max(-delta, 0) for delta in deltas]
+    @staticmethod
+    def calculate_rsi(prices: List[float], period: int = 14) -> List[float]:
+        """Calcula RSI com método Wilder"""
+        if len(prices) < period + 1:
+            return [50.0] * len(prices)
         
-        if len(gains) < period:
-            return []
+        try:
+            deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
+            gains = [max(delta, 0) for delta in deltas]
+            losses = [max(-delta, 0) for delta in deltas]
             
-        avg_gain = sum(gains[:period]) / period
-        avg_loss = sum(losses[:period]) / period
-        
-        rsi_values = []
-        
-        if avg_loss == 0:
-            rsi_values.append(100)
-        else:
-            rs = avg_gain / avg_loss
-            rsi_values.append(100 - (100 / (1 + rs)))
-        
-        for i in range(period, len(gains)):
-            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+            avg_gain = sum(gains[:period]) / period
+            avg_loss = sum(losses[:period]) / period
             
-            if avg_loss == 0:
-                rsi_values.append(100)
-            else:
-                rs = avg_gain / avg_loss
-                rsi_values.append(100 - (100 / (1 + rs)))
+            rsi_values = [100 - (100 / (1 + (avg_gain / avg_loss))) if avg_loss != 0 else 100]
+            
+            for i in range(period, len(gains)):
+                avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+                avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+                
+                if avg_loss == 0:
+                    rsi_values.append(100)
+                else:
+                    rs = avg_gain / avg_loss
+                    rsi_values.append(100 - (100 / (1 + rs)))
+            
+            return [50.0] * period + rsi_values
+            
+        except Exception as e:
+            logger.error(f"Erro RSI: {e}")
+            return [50.0] * len(prices)
+    
+    @staticmethod
+    def calculate_ema(prices: List[float], period: int) -> List[float]:
+        """Calcula EMA com validação robusta"""
+        if len(prices) < period:
+            return [prices[0]] * len(prices) if prices else []
         
-        result = [50.0] * period
-        result.extend(rsi_values)
-        return result[-len(prices):]
-        
-    except Exception as e:
-        print(f"❌ Erro no cálculo RSI: {e}")
-        return [50.0] * len(prices)
+        try:
+            multiplier = 2 / (period + 1)
+            sma = sum(prices[:period]) / period
+            ema_values = [sma]
+            
+            for price in prices[period:]:
+                ema = (price * multiplier) + (ema_values[-1] * (1 - multiplier))
+                ema_values.append(ema)
+            
+            # Preencher valores iniciais
+            return [prices[0]] * (period - 1) + ema_values
+            
+        except Exception as e:
+            logger.error(f"Erro EMA {period}: {e}")
+            return prices
+    
+    @staticmethod
+    def calculate_macd(prices: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> Tuple[List[float], List[float], List[float]]:
+        """Calcula MACD completo (linha, sinal, histograma)"""
+        try:
+            ema_fast = TechnicalAnalyzer.calculate_ema(prices, fast_period)
+            ema_slow = TechnicalAnalyzer.calculate_ema(prices, slow_period)
+            
+            # Garantir mesmo tamanho
+            min_len = min(len(ema_fast), len(ema_slow))
+            macd_line = [ema_fast[i] - ema_slow[i] for i in range(min_len)]
+            
+            signal_line = TechnicalAnalyzer.calculate_ema(macd_line, signal_period)
+            
+            # Calcular histograma
+            histogram = []
+            for i in range(min(len(macd_line), len(signal_line))):
+                histogram.append(macd_line[i] - signal_line[i])
+            
+            return macd_line, signal_line, histogram
+            
+        except Exception as e:
+            logger.error(f"Erro MACD: {e}")
+            empty = [0.0] * len(prices)
+            return empty, empty, empty
 
-def calculate_ema(prices, period):
-    """Calcula EMA para uma lista de preços"""
-    if len(prices) < period:
-        return [prices[0]] * len(prices) if prices else []
+class BinanceAPI:
+    """Classe para interações com API Binance"""
     
-    multiplier = 2 / (period + 1)
-    sma_initial = sum(prices[:period]) / period
-    ema_values = [None] * (period - 1) + [sma_initial]
-    
-    for i in range(period, len(prices)):
-        ema = (prices[i] * multiplier) + (ema_values[-1] * (1 - multiplier))
-        ema_values.append(ema)
-    
-    for i in range(period - 1):
-        ema_values[i] = prices[0]
-    
-    return ema_values
-
-def calculate_macd(prices, fast_period=12, slow_period=26, signal_period=9):
-    """Calcula MACD - Versão simplificada"""
-    if len(prices) < max(fast_period, slow_period, signal_period):
-        return [], []
-    
-    try:
-        ema_fast = calculate_ema(prices, fast_period)
-        ema_slow = calculate_ema(prices, slow_period)
-        macd_line = [ema_fast[i] - ema_slow[i] for i in range(len(ema_fast))]
-        signal_line = calculate_ema(macd_line, signal_period)
-        return macd_line, signal_line
-    except Exception as e:
-        print(f"❌ Erro no cálculo MACD: {e}")
-        return [0.0] * len(prices), [0.0] * len(prices)
-
-def safe_binance_request(func, *args, **kwargs):
-    """Wrapper seguro para requests da Binance"""
-    try:
-        return func(*args, **kwargs)
-    except Exception as e:
-        print(f"❌ Erro na requisição Binance: {e}")
+    @staticmethod
+    def safe_request(func, *args, **kwargs):
+        """Wrapper seguro para requests da Binance"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                result = func(*args, **kwargs)
+                if result:
+                    return result
+            except Exception as e:
+                logger.warning(f"Tentativa {attempt + 1} falhou: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                else:
+                    logger.error(f"Todas as tentativas falharam para {func.__name__}")
+                    return None
         return None
+    
+    @staticmethod
+    def get_klines(symbol: str, interval: str, limit: int = 100):
+        """Obtém klines com tratamento de erro"""
+        return BinanceAPI.safe_request(client.get_klines, symbol=symbol, interval=interval, limit=limit)
+    
+    @staticmethod
+    def get_symbol_ticker(symbol: str):
+        """Obtém ticker do símbolo"""
+        return BinanceAPI.safe_request(client.get_symbol_ticker, symbol=symbol)
 
-def monitor_whales(timeframe, multiple, ema_type, my_thread_id):
-    global stop_monitoring, current_timeframe, current_multiple, current_ema_type, thread_id, last_processed
+def initialize_symbol_batches():
+    """Inicializa os batches de símbolos para processamento rotativo"""
+    global symbol_batches, current_batch_index
+    symbols = get_trading_symbols()
     
-    print(f"🚀 THREAD {my_thread_id} INICIADA:")
-    print(f"   - Timeframe: {timeframe}")
-    print(f"   - Múltiplo mínimo: {multiple}")
-    print(f"   - EMA Type: {ema_type} ({EMA_CONFIGS[ema_type]['name']})")
-    
-    if my_thread_id != thread_id:
-        print(f"❌ THREAD {my_thread_id} CANCELADA - Nova thread {thread_id} iniciada")
+    if not symbols:
+        logger.error("❌ CRÍTICO: Nenhum símbolo disponível para monitoramento!")
+        symbol_batches = []
         return
     
+    # Criar batches menores para não sobrecarregar a API
+    symbol_batches = [symbols[i:i + BATCH_SIZE] for i in range(0, len(symbols), BATCH_SIZE)]
+    current_batch_index = 0
+    
+    logger.info(f"📦 Inicializados {len(symbol_batches)} batches de {BATCH_SIZE} símbolos cada")
+    return symbol_batches
+
+def get_next_symbol_batch():
+    """Obtém o próximo batch de símbolos para processamento"""
+    global symbol_batches, current_batch_index
+    
+    if not symbol_batches:
+        logger.warning("🔄 Nenhum batch disponível, inicializando...")
+        initialize_symbol_batches()
+        
+        # Se ainda não houver batches, retornar lista vazia
+        if not symbol_batches:
+            logger.error("❌ Nenhum batch disponível mesmo após inicialização")
+            return []
+    
+    # Obter batch atual e avançar índice
+    batch = symbol_batches[current_batch_index]
+    current_batch_index = (current_batch_index + 1) % len(symbol_batches)
+    
+    return batch
+
+def add_alert_to_history(alert: Dict):
+    """Adiciona alerta ao histórico"""
+    global alert_history
+    alert['id'] = len(alert_history) + 1
+    alert_history.insert(0, alert)
+    
+    # Manter apenas os últimos alertas
+    if len(alert_history) > MAX_ALERT_HISTORY:
+        alert_history = alert_history[:MAX_ALERT_HISTORY]
+
+def monitor_whales(timeframe: str, multiple: float, ema_type: str, my_thread_id: int):
+    """Função principal de monitoramento para TODAS as criptomoedas"""
+    global stop_monitoring, current_timeframe, current_multiple, current_ema_type, thread_id, last_processed, stats, last_rsi_values
+    
+    logger.info(f"🚀 THREAD {my_thread_id} INICIADA: TF={timeframe}, Múltiplo={multiple}, EMA={ema_type}")
+    
+    # Verificar se thread ainda é válida
+    if my_thread_id != thread_id:
+        logger.info(f"❌ THREAD {my_thread_id} CANCELADA")
+        return
+    
+    # Configurações atuais
     current_timeframe = timeframe
     current_multiple = multiple
     current_ema_type = ema_type
     ema_config = EMA_CONFIGS[ema_type]
-    fast_period = ema_config['fast']
-    slow_period = ema_config['slow']
+    timeframe_config = TIMEFRAME_CONFIG[timeframe]
     
-    check_interval = timeframe_to_check_interval.get(timeframe, 20)
+    check_interval = timeframe_config['interval']
     
+    # Inicializar batches de símbolos
+    initialize_symbol_batches()
+    all_symbols = get_trading_symbols()
+    
+    if not all_symbols:
+        logger.error("❌ IMPOSSÍVEL INICIAR: Nenhum símbolo disponível")
+        socketio.emit('monitoring_error', {
+            'error': 'Nenhum símbolo disponível para monitoramento',
+            'thread_id': my_thread_id
+        })
+        return
+    
+    # Inicializar estatísticas
+    stats = {
+        'volume_alerts': 0,
+        'rsi_alerts': 0,
+        'ema_alerts': 0,
+        'macd_alerts': 0,
+        'total_cycles': 0,
+        'total_processed': 0,
+        'start_time': datetime.now().isoformat(),
+        'total_symbols': len(all_symbols)
+    }
+    
+    # Resetar controle de RSI
+    last_rsi_values = {}
+    
+    # Notificar início
     socketio.emit('monitoring_started', {
         'status': 'Iniciado', 
         'timeframe': timeframe, 
         'multiple': multiple,
         'ema_type': ema_type,
-        'ema_name': ema_config['name']
+        'ema_name': ema_config['name'],
+        'symbols_count': len(all_symbols),
+        'thread_id': my_thread_id
     })
     
     cycle_count = 0
+    analyzer = TechnicalAnalyzer()
+    
     while not stop_monitoring and my_thread_id == thread_id:
         cycle_count += 1
-        alerts_count = 0
-        rsi_alerts = 0
-        ema_alerts = 0
-        macd_alerts = 0
+        stats['total_cycles'] = cycle_count
+        
+        cycle_alerts = {
+            'volume': 0,
+            'rsi': 0,
+            'ema': 0,
+            'macd': 0
+        }
         processed_count = 0
         
-        print(f"🔍 THREAD {my_thread_id} - CICLO {cycle_count} - Múltiplo: {multiple} - EMA: {ema_config['name']}")
+        # Obter batch atual de símbolos
+        current_batch = get_next_symbol_batch()
         
-        for symbol in symbols:
+        if not current_batch:
+            logger.error("❌ Batch vazio, aguardando e tentando novamente...")
+            time.sleep(check_interval)
+            continue
+        
+        logger.info(f"🔍 CICLO {cycle_count} - Batch {current_batch_index}/{len(symbol_batches)} - {len(current_batch)} símbolos - Múltiplo: {multiple}")
+        
+        for symbol in current_batch:
+            # Verificar se deve continuar
             if stop_monitoring or my_thread_id != thread_id:
-                print(f"❌ THREAD {my_thread_id} INTERROMPIDA")
+                logger.info(f"❌ THREAD {my_thread_id} INTERROMPIDA")
                 return
-                
+            
             try:
+                # Rate limiting inteligente
                 current_time = time.time()
-                if symbol in last_processed and (current_time - last_processed[symbol]) < check_interval/2:
-                    continue
+                if symbol in last_processed:
+                    time_since_last = current_time - last_processed[symbol]
+                    if time_since_last < check_interval / 3:
+                        continue
                 
                 last_processed[symbol] = current_time
                 
-                # Usar wrapper seguro para request Binance
-                klines = safe_binance_request(client.get_klines, symbol=symbol, interval=timeframe, limit=100)
+                # Obter dados
+                klines = BinanceAPI.get_klines(symbol, timeframe, 100)
                 if not klines or len(klines) < 50:
                     continue
                 
+                # Extrair dados das klines
                 closes = [float(k[4]) for k in klines]
+                volumes = [float(k[5]) for k in klines]
+                
                 processed_count += 1
+                stats['total_processed'] += 1
                 
-                # 1. VERIFICAÇÃO RSI
+                # 1. ANÁLISE RSI - CORRIGIDA
                 try:
-                    rsi_values = calculate_rsi(closes, period=14)
-                    if len(rsi_values) >= 2:
+                    rsi_values = analyzer.calculate_rsi(closes, RSI_CONFIG['period'])
+                    if len(rsi_values) >= 1:
                         current_rsi = rsi_values[-1]
-                        previous_rsi = rsi_values[-2]
                         
-                        if previous_rsi <= 30 and current_rsi > 31:
-                            rsi_alert = {
-                                'type': 'RSI',
-                                'crypto': symbol.replace('USDT', ''),
-                                'previous_rsi': round(previous_rsi, 2),
-                                'current_rsi': round(current_rsi, 2),
-                                'timestamp': datetime.now().strftime('%H:%M:%S'),
-                                'timeframe': timeframe,
-                                'thread_id': my_thread_id
-                            }
-                            socketio.emit('indicator_alert', rsi_alert)
-                            rsi_alerts += 1
-                            print(f"🚨📈 RSI ALERT: {symbol} - {previous_rsi:.2f} → {current_rsi:.2f}")
-                except Exception as rsi_error:
-                    pass
-                
-                # 2. VERIFICAÇÃO EMA
-                try:
-                    if len(closes) >= slow_period:  
-                        ema_fast_values = calculate_ema(closes, fast_period)
-                        ema_slow_values = calculate_ema(closes, slow_period)
-                        
-                        if (len(ema_fast_values) >= 2 and len(ema_slow_values) >= 2 and
-                            not math.isnan(ema_fast_values[-2]) and not math.isnan(ema_slow_values[-2]) and
-                            not math.isnan(ema_fast_values[-1]) and not math.isnan(ema_slow_values[-1])):
+                        # Verificar se já temos um valor anterior armazenado
+                        if symbol in last_rsi_values:
+                            previous_rsi = last_rsi_values[symbol]
                             
-                            if (ema_fast_values[-2] <= ema_slow_values[-2] and 
-                                ema_fast_values[-1] > ema_slow_values[-1]):
-                                ema_alert = {
-                                    'type': 'EMA',
+                            # Alerta RSI Oversold - Cruzamento de baixo de 30 acima de 31
+                            if previous_rsi <= 30 and current_rsi > 31:
+                                rsi_alert = {
+                                    'type': 'RSI_OVERSOLD',
                                     'crypto': symbol.replace('USDT', ''),
-                                    'ema_name': ema_config['name'],
-                                    'timestamp': datetime.now().strftime('%H:%M:%S'),
+                                    'symbol': symbol,
+                                    'previous_rsi': round(previous_rsi, 2),
+                                    'current_rsi': round(current_rsi, 2),
+                                    'value': round(current_rsi, 2),
+                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                                     'timeframe': timeframe,
-                                    'thread_id': my_thread_id
+                                    'timeframe_name': timeframe_config['name'],
+                                    'thread_id': my_thread_id,
+                                    'color': 'green'
+                                }
+                                socketio.emit('indicator_alert', rsi_alert)
+                                add_alert_to_history(rsi_alert)
+                                cycle_alerts['rsi'] += 1
+                                stats['rsi_alerts'] += 1
+                                logger.info(f"🚨📈 RSI OVERSOLD: {symbol} {previous_rsi:.1f}→{current_rsi:.1f}")
+                            
+                            # Alerta RSI Overbought - Cruzamento de cima de 70 abaixo de 69
+                            elif previous_rsi >= 70 and current_rsi < 69:
+                                rsi_alert = {
+                                    'type': 'RSI_OVERBOUGHT',
+                                    'crypto': symbol.replace('USDT', ''),
+                                    'symbol': symbol,
+                                    'previous_rsi': round(previous_rsi, 2),
+                                    'current_rsi': round(current_rsi, 2),
+                                    'value': round(current_rsi, 2),
+                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                    'timeframe': timeframe,
+                                    'timeframe_name': timeframe_config['name'],
+                                    'thread_id': my_thread_id,
+                                    'color': 'red'
+                                }
+                                socketio.emit('indicator_alert', rsi_alert)
+                                add_alert_to_history(rsi_alert)
+                                cycle_alerts['rsi'] += 1
+                                stats['rsi_alerts'] += 1
+                                logger.info(f"🚨📉 RSI OVERBOUGHT: {symbol} {previous_rsi:.1f}→{current_rsi:.1f}")
+                        
+                        # Armazenar RSI atual para próxima comparação
+                        last_rsi_values[symbol] = current_rsi
+                            
+                except Exception as rsi_error:
+                    logger.debug(f"Erro RSI {symbol}: {rsi_error}")
+                
+                # 2. ANÁLISE EMA
+                try:
+                    if len(closes) >= ema_config['slow']:
+                        ema_fast = analyzer.calculate_ema(closes, ema_config['fast'])
+                        ema_slow = analyzer.calculate_ema(closes, ema_config['slow'])
+                        
+                        if (len(ema_fast) >= 2 and len(ema_slow) >= 2 and
+                            not math.isnan(ema_fast[-2]) and not math.isnan(ema_slow[-2]) and
+                            not math.isnan(ema_fast[-1]) and not math.isnan(ema_slow[-1])):
+                            
+                            # Golden Cross
+                            if (ema_fast[-2] <= ema_slow[-2] and ema_fast[-1] > ema_slow[-1]):
+                                ema_alert = {
+                                    'type': 'EMA_GOLDEN_CROSS',
+                                    'crypto': symbol.replace('USDT', ''),
+                                    'symbol': symbol,
+                                    'ema_name': ema_config['name'],
+                                    'ema_fast': round(ema_fast[-1], 6),
+                                    'ema_slow': round(ema_slow[-1], 6),
+                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                    'timeframe': timeframe,
+                                    'timeframe_name': timeframe_config['name'],
+                                    'thread_id': my_thread_id,
+                                    'color': 'green'
                                 }
                                 socketio.emit('indicator_alert', ema_alert)
-                                ema_alerts += 1
-                                print(f"🚨📈 EMA ALERT ({ema_config['name']}): {symbol}")
+                                add_alert_to_history(ema_alert)
+                                cycle_alerts['ema'] += 1
+                                stats['ema_alerts'] += 1
+                                logger.info(f"🚨📈 EMA GOLDEN CROSS: {symbol} ({ema_config['name']})")
+                            
+                            # Death Cross
+                            elif (ema_fast[-2] >= ema_slow[-2] and ema_fast[-1] < ema_slow[-1]):
+                                ema_alert = {
+                                    'type': 'EMA_DEATH_CROSS',
+                                    'crypto': symbol.replace('USDT', ''),
+                                    'symbol': symbol,
+                                    'ema_name': ema_config['name'],
+                                    'ema_fast': round(ema_fast[-1], 6),
+                                    'ema_slow': round(ema_slow[-1], 6),
+                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                    'timeframe': timeframe,
+                                    'timeframe_name': timeframe_config['name'],
+                                    'thread_id': my_thread_id,
+                                    'color': 'red'
+                                }
+                                socketio.emit('indicator_alert', ema_alert)
+                                add_alert_to_history(ema_alert)
+                                cycle_alerts['ema'] += 1
+                                stats['ema_alerts'] += 1
+                                logger.info(f"🚨📉 EMA DEATH CROSS: {symbol} ({ema_config['name']})")
+                                
                 except Exception as ema_error:
-                    pass
+                    logger.debug(f"Erro EMA {symbol}: {ema_error}")
 
-                # 3. VERIFICAÇÃO MACD
+                # 3. ANÁLISE MACD
                 try:
                     if len(closes) >= 35:
-                        macd_line, signal_line = calculate_macd(closes)
+                        macd_line, signal_line, histogram = analyzer.calculate_macd(closes)
                         
                         if (len(macd_line) >= 2 and len(signal_line) >= 2 and
                             not math.isnan(macd_line[-2]) and not math.isnan(signal_line[-2]) and
                             not math.isnan(macd_line[-1]) and not math.isnan(signal_line[-1])):
                             
-                            if (macd_line[-2] <= signal_line[-2] and 
-                                macd_line[-1] > signal_line[-1]):
+                            # Bullish Cross
+                            if (macd_line[-2] <= signal_line[-2] and macd_line[-1] > signal_line[-1]):
                                 macd_alert = {
-                                    'type': 'MACD',
+                                    'type': 'MACD_BULLISH_CROSS',
                                     'crypto': symbol.replace('USDT', ''),
-                                    'timestamp': datetime.now().strftime('%H:%M:%S'),
+                                    'symbol': symbol,
+                                    'macd_line': round(macd_line[-1], 6),
+                                    'signal_line': round(signal_line[-1], 6),
+                                    'histogram': round(histogram[-1], 6),
+                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                                     'timeframe': timeframe,
-                                    'thread_id': my_thread_id
+                                    'timeframe_name': timeframe_config['name'],
+                                    'thread_id': my_thread_id,
+                                    'color': 'green'
                                 }
                                 socketio.emit('indicator_alert', macd_alert)
-                                macd_alerts += 1
-                                print(f"🚨📈 MACD ALERT: {symbol}")
+                                add_alert_to_history(macd_alert)
+                                cycle_alerts['macd'] += 1
+                                stats['macd_alerts'] += 1
+                                logger.info(f"🚨📈 MACD BULLISH: {symbol}")
+                            
+                            # Bearish Cross
+                            elif (macd_line[-2] >= signal_line[-2] and macd_line[-1] < signal_line[-1]):
+                                macd_alert = {
+                                    'type': 'MACD_BEARISH_CROSS',
+                                    'crypto': symbol.replace('USDT', ''),
+                                    'symbol': symbol,
+                                    'macd_line': round(macd_line[-1], 6),
+                                    'signal_line': round(signal_line[-1], 6),
+                                    'histogram': round(histogram[-1], 6),
+                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                    'timeframe': timeframe,
+                                    'timeframe_name': timeframe_config['name'],
+                                    'thread_id': my_thread_id,
+                                    'color': 'red'
+                                }
+                                socketio.emit('indicator_alert', macd_alert)
+                                add_alert_to_history(macd_alert)
+                                cycle_alerts['macd'] += 1
+                                stats['macd_alerts'] += 1
+                                logger.info(f"🚨📉 MACD BEARISH: {symbol}")
+                                
                 except Exception as macd_error:
-                    pass
+                    logger.debug(f"Erro MACD {symbol}: {macd_error}")
 
-                # 4. VERIFICAÇÃO VOLUME
+                # 4. ANÁLISE DE VOLUME
                 try:
-                    klines_volume = safe_binance_request(client.get_klines, symbol=symbol, interval=timeframe, limit=21)
-                    if not klines_volume or len(klines_volume) < 21:
+                    volume_klines = BinanceAPI.get_klines(symbol, timeframe, 21)
+                    if not volume_klines or len(volume_klines) < 21:
                         continue
                     
-                    current_volume = float(klines_volume[-1][5])
-                    historical_volumes = [float(k[5]) for k in klines_volume[-21:-1]]
+                    current_volume = float(volume_klines[-1][5])
+                    current_close = float(volume_klines[-1][4])
+                    
+                    # Calcular volume médio (excluindo atual)
+                    historical_volumes = [float(k[5]) for k in volume_klines[-21:-1]]
                     avg_volume = sum(historical_volumes) / len(historical_volumes) if historical_volumes else 0
                     
                     if avg_volume > 0:
-                        calculated_multiple = current_volume / avg_volume
+                        volume_ratio = current_volume / avg_volume
                         
-                        if calculated_multiple >= multiple and my_thread_id == thread_id:
-                            alert = {
+                        # Alerta de volume alto
+                        if volume_ratio >= multiple and my_thread_id == thread_id:
+                            price_change = ((current_close - float(volume_klines[-2][4])) / float(volume_klines[-2][4])) * 100
+                            
+                            volume_alert = {
                                 'crypto': symbol.replace('USDT', ''),
+                                'symbol': symbol,
                                 'volume': round(current_volume, 2),
                                 'avg_volume': round(avg_volume, 2),
-                                'multiple': round(calculated_multiple, 2),
-                                'timestamp': datetime.now().strftime('%H:%M:%S'),
+                                'multiple': round(volume_ratio, 2),
+                                'price': round(current_close, 6),
+                                'price_change': round(price_change, 2),
+                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                                 'timeframe': timeframe,
-                                'thread_id': my_thread_id
+                                'timeframe_name': timeframe_config['name'],
+                                'thread_id': my_thread_id,
+                                'color': 'green' if price_change > 0 else 'red'
                             }
-                            socketio.emit('whale_alert', alert)
-                            alerts_count += 1
-                            print(f"🚨📊 VOLUME ALERT: {symbol} = {calculated_multiple:.2f}x")
+                            socketio.emit('whale_alert', volume_alert)
+                            add_alert_to_history(volume_alert)
+                            cycle_alerts['volume'] += 1
+                            stats['volume_alerts'] += 1
+                            logger.info(f"🚨📊 VOLUME ALERT: {symbol} {volume_ratio:.1f}x ({price_change:+.1f}%)")
                 
                 except Exception as volume_error:
-                    pass
+                    logger.debug(f"Erro Volume {symbol}: {volume_error}")
                     
             except Exception as e:
-                print(f"❌ Erro geral {symbol}: {e}")
+                logger.error(f"❌ Erro geral {symbol}: {e}")
             
-            time.sleep(0.01)
+            # Pequena pausa entre símbolos para rate limiting
+            time.sleep(0.05)
         
+        # Verificar se thread ainda é válida
         if my_thread_id != thread_id:
-            print(f"❌ THREAD {my_thread_id} FINALIZADA")
+            logger.info(f"❌ THREAD {my_thread_id} FINALIZADA")
             return
             
-        print(f"✅ CICLO {cycle_count} COMPLETO - Volume: {alerts_count}, RSI: {rsi_alerts}, EMA: {ema_alerts}, MACD: {macd_alerts}")
-        print(f"   Símbolos processados: {processed_count}, Próxima verificação: {check_interval}s")
-        print("=" * 60)
+        # Estatísticas do ciclo
+        logger.info(f"✅ CICLO {cycle_count} COMPLETO:")
+        logger.info(f"   📊 Volume: {cycle_alerts['volume']}, RSI: {cycle_alerts['rsi']}, EMA: {cycle_alerts['ema']}, MACD: {cycle_alerts['macd']}")
+        logger.info(f"   🔄 Símbolos processados: {processed_count}")
+        logger.info(f"   ⏱️  Próxima verificação: {check_interval}s")
+        logger.info("=" * 70)
         
+        # Emitir estatísticas
+        socketio.emit('stats_update', {
+            'cycle': cycle_count,
+            'alerts': cycle_alerts,
+            'processed': processed_count,
+            'total_alerts': stats,
+            'batch_info': {
+                'current_batch': current_batch_index,
+                'total_batches': len(symbol_batches),
+                'batch_size': BATCH_SIZE
+            }
+        })
+        
+        # Espera adaptativa
         time.sleep(check_interval)
-
-# Template HTML
-HTML_TEMPLATE = '''
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Whale Detector - Binance</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <style>
-        .alert-fade-in { animation: fadeIn 0.5s ease-in; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
-        .pulse-alert { animation: pulse 2s infinite; }
-        @keyframes pulse { 
-            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
-            70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
-        }
-    </style>
-</head>
-<body class="bg-gray-900 text-white">
-    <div class="container mx-auto px-4 py-8">
-        <div class="text-center mb-8">
-            <h1 class="text-4xl font-bold text-green-400 mb-2">
-                <i class="fas fa-whale mr-3"></i>Whale Detector
-            </h1>
-            <p class="text-gray-400">Monitoramento em tempo real - Binance</p>
-        </div>
-
-        <div class="bg-gray-800 rounded-lg p-6 mb-8">
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-2">Timeframe</label>
-                    <select id="timeframe" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
-                        <option value="1m">1 Minuto</option>
-                        <option value="5m">5 Minutos</option>
-                        <option value="15m">15 Minutos</option>
-                        <option value="1h">1 Hora</option>
-                        <option value="4h">4 Horas</option>
-                        <option value="1d">1 Dia</option>
-                    </select>
-                </div>
-                
-                <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-2">Múltiplo Mínimo</label>
-                    <select id="multiple" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
-                        <option value="3">3x</option>
-                        <option value="5">5x</option>
-                        <option value="8">8x</option>
-                        <option value="10">10x</option>
-                    </select>
-                </div>
-
-                <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-2">Configuração EMA</label>
-                    <select id="ema_type" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white">
-                        <option value="ema_7_21">EMA 7x21 (Curto Prazo)</option>
-                        <option value="ema_20_50">EMA 20x50 (Swing Trade)</option>
-                        <option value="ema_50_200">EMA 50x200 (Golden Cross)</option>
-                    </select>
-                </div>
-
-                <div class="flex items-end space-x-2">
-                    <button id="startBtn" class="flex-1 bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg">
-                        <i class="fas fa-play mr-2"></i>Iniciar
-                    </button>
-                    <button id="stopBtn" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg">
-                        <i class="fas fa-stop mr-2"></i>Parar
-                    </button>
-                </div>
-            </div>
-        </div>
-
-        <div id="status" class="bg-gray-800 rounded-lg p-4 mb-8 hidden">
-            <div class="flex items-center justify-between">
-                <div>
-                    <h3 class="text-lg font-semibold text-green-400">
-                        <i class="fas fa-circle animate-pulse text-green-500 mr-2"></i>
-                        Monitoramento Ativo
-                    </h3>
-                    <p id="statusDetails" class="text-gray-400 text-sm"></p>
-                </div>
-                <div id="connectionStatus" class="flex items-center text-green-500">
-                    <i class="fas fa-wifi mr-2"></i>
-                    <span>Conectado</span>
-                </div>
-            </div>
-        </div>
-
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div class="bg-gray-800 rounded-lg p-6">
-                <h2 class="text-xl font-bold text-yellow-400 mb-4">
-                    <i class="fas fa-chart-bar mr-2"></i>Alertas de Volume
-                </h2>
-                <div id="volumeAlerts" class="space-y-3 max-h-96 overflow-y-auto">
-                    <div class="text-gray-500 text-center py-4">Aguardando alertas...</div>
-                </div>
-            </div>
-
-            <div class="bg-gray-800 rounded-lg p-6">
-                <h2 class="text-xl font-bold text-blue-400 mb-4">
-                    <i class="fas fa-chart-line mr-2"></i>Alertas de Indicadores
-                </h2>
-                <div id="indicatorAlerts" class="space-y-3 max-h-96 overflow-y-auto">
-                    <div class="text-gray-500 text-center py-4">Aguardando alertas...</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="mt-8 grid grid-cols-1 md:grid-cols-4 gap-4">
-            <div class="bg-gray-800 rounded-lg p-4 text-center">
-                <div class="text-2xl font-bold text-green-400" id="totalSymbols">0</div>
-                <div class="text-gray-400 text-sm">Símbolos</div>
-            </div>
-            <div class="bg-gray-800 rounded-lg p-4 text-center">
-                <div class="text-2xl font-bold text-yellow-400" id="volumeAlertsCount">0</div>
-                <div class="text-gray-400 text-sm">Alertas Volume</div>
-            </div>
-            <div class="bg-gray-800 rounded-lg p-4 text-center">
-                <div class="text-2xl font-bold text-blue-400" id="indicatorAlertsCount">0</div>
-                <div class="text-gray-400 text-sm">Alertas Indicadores</div>
-            </div>
-            <div class="bg-gray-800 rounded-lg p-4 text-center">
-                <div class="text-2xl font-bold text-purple-400" id="lastUpdate">-</div>
-                <div class="text-gray-400 text-sm">Última Atualização</div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        const socket = io();
-        let volumeAlertCount = 0;
-        let indicatorAlertCount = 0;
-
-        const startBtn = document.getElementById('startBtn');
-        const stopBtn = document.getElementById('stopBtn');
-        const statusDiv = document.getElementById('status');
-        const statusDetails = document.getElementById('statusDetails');
-        const volumeAlertsDiv = document.getElementById('volumeAlerts');
-        const indicatorAlertsDiv = document.getElementById('indicatorAlerts');
-        const totalSymbolsSpan = document.getElementById('totalSymbols');
-        const volumeAlertsCountSpan = document.getElementById('volumeAlertsCount');
-        const indicatorAlertsCountSpan = document.getElementById('indicatorAlertsCount');
-        const lastUpdateSpan = document.getElementById('lastUpdate');
-
-        startBtn.addEventListener('click', () => {
-            const timeframe = document.getElementById('timeframe').value;
-            const multiple = document.getElementById('multiple').value;
-            const emaType = document.getElementById('ema_type').value;
-
-            fetch('/start_monitoring', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                body: `timeframe=${timeframe}&multiple=${multiple}&ema_type=${emaType}`
-            }).then(response => response.text()).then(data => {
-                console.log('Iniciado:', data);
-            }).catch(error => {
-                console.error('Erro:', error);
-            });
-        });
-
-        stopBtn.addEventListener('click', () => {
-            fetch('/stop_monitoring', {method: 'POST'})
-            .then(response => response.text())
-            .then(data => console.log('Parado:', data))
-            .catch(error => console.error('Erro:', error));
-        });
-
-        socket.on('connect', () => {
-            console.log('Conectado ao servidor');
-            document.getElementById('connectionStatus').innerHTML = '<i class="fas fa-wifi mr-2"></i><span>Conectado</span>';
-        });
-
-        socket.on('disconnect', () => {
-            console.log('Desconectado');
-            document.getElementById('connectionStatus').innerHTML = '<i class="fas fa-wifi mr-2"></i><span class="text-red-500">Desconectado</span>';
-        });
-
-        socket.on('monitoring_started', (data) => {
-            statusDiv.classList.remove('hidden');
-            statusDetails.innerHTML = `Timeframe: ${data.timeframe} | Múltiplo: ${data.multiple}x | EMA: ${data.ema_name}`;
-        });
-
-        socket.on('monitoring_stopped', (data) => {
-            statusDiv.classList.add('hidden');
-        });
-
-        socket.on('whale_alert', (alert) => {
-            volumeAlertCount++;
-            addVolumeAlert(alert);
-            updateStats();
-        });
-
-        socket.on('indicator_alert', (alert) => {
-            indicatorAlertCount++;
-            addIndicatorAlert(alert);
-            updateStats();
-        });
-
-        function addVolumeAlert(alert) {
-            const alertElement = document.createElement('div');
-            alertElement.className = 'alert-fade-in pulse-alert bg-yellow-900 border-l-4 border-yellow-500 p-3 rounded';
-            alertElement.innerHTML = `
-                <div class="flex justify-between items-start">
-                    <div>
-                        <div class="font-bold text-yellow-300 text-lg">${alert.crypto}</div>
-                        <div class="text-yellow-200 text-sm">Volume: ${formatNumber(alert.volume)}</div>
-                        <div class="text-gray-300 text-xs">Média: ${formatNumber(alert.avg_volume)} (${alert.multiple}x)</div>
-                    </div>
-                    <div class="text-right">
-                        <div class="text-yellow-400 font-bold">${alert.multiple}x</div>
-                        <div class="text-gray-400 text-xs">${alert.timestamp}</div>
-                    </div>
-                </div>
-                <div class="text-gray-400 text-xs mt-1">${alert.timeframe}</div>
-            `;
-
-            if (volumeAlertsDiv.firstChild?.className?.includes('text-gray-500')) {
-                volumeAlertsDiv.innerHTML = '';
-            }
-            volumeAlertsDiv.insertBefore(alertElement, volumeAlertsDiv.firstChild);
-
-            if (volumeAlertsDiv.children.length > 20) {
-                volumeAlertsDiv.removeChild(volumeAlertsDiv.lastChild);
-            }
-        }
-
-        function addIndicatorAlert(alert) {
-            const colors = {RSI: 'green', EMA: 'purple', MACD: 'pink'};
-            const color = colors[alert.type] || 'blue';
-            
-            const alertElement = document.createElement('div');
-            alertElement.className = `alert-fade-in pulse-alert bg-${color}-900 border-l-4 border-${color}-500 p-3 rounded`;
-            alertElement.innerHTML = `
-                <div class="flex justify-between items-start">
-                    <div>
-                        <div class="font-bold text-${color}-300 text-lg">${alert.crypto}</div>
-                        <div class="text-${color}-200 text-sm">${alert.type}</div>
-                        ${alert.ema_name ? `<div class="text-gray-300 text-xs">${alert.ema_name}</div>` : ''}
-                    </div>
-                    <div class="text-right">
-                        <div class="text-${color}-400 font-bold">${alert.type}</div>
-                        <div class="text-gray-400 text-xs">${alert.timestamp}</div>
-                    </div>
-                </div>
-                <div class="text-gray-400 text-xs mt-1">${alert.timeframe}</div>
-            `;
-
-            if (indicatorAlertsDiv.firstChild?.className?.includes('text-gray-500')) {
-                indicatorAlertsDiv.innerHTML = '';
-            }
-            indicatorAlertsDiv.insertBefore(alertElement, indicatorAlertsDiv.firstChild);
-
-            if (indicatorAlertsDiv.children.length > 20) {
-                indicatorAlertsDiv.removeChild(indicatorAlertsDiv.lastChild);
-            }
-        }
-
-        function formatNumber(num) {
-            if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
-            if (num >= 1000) return (num / 1000).toFixed(2) + 'K';
-            return num.toFixed(2);
-        }
-
-        function updateStats() {
-            volumeAlertsCountSpan.textContent = volumeAlertCount;
-            indicatorAlertsCountSpan.textContent = indicatorAlertCount;
-            lastUpdateSpan.textContent = new Date().toLocaleTimeString();
-        }
-
-        updateStats();
-        
-        fetch('/status')
-            .then(response => response.json())
-            .then(data => {
-                totalSymbolsSpan.textContent = data.total_symbols;
-                if (data.monitoring_active) {
-                    showStatus(data);
-                }
-            });
-    </script>
-</body>
-</html>
-'''
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return render_template('index.html', 
+                         TIMEFRAME_CONFIG=TIMEFRAME_CONFIG,
+                         EMA_CONFIGS=EMA_CONFIGS)
 
 @app.route('/status')
 def status():
+    """Rota para verificar status do monitoramento"""
     ema_name = EMA_CONFIGS.get(current_ema_type, {}).get('name', '') if current_ema_type else ''
+    symbols = get_trading_symbols()
+    
     return {
         'monitoring_active': not stop_monitoring,
         'current_timeframe': current_timeframe,
@@ -650,7 +679,8 @@ def status():
         'current_ema_name': ema_name,
         'total_symbols': len(symbols),
         'monitoring_thread_active': monitoring_thread is not None,
-        'current_thread_id': thread_id
+        'current_thread_id': thread_id,
+        'stats': stats
     }
 
 @app.route('/start_monitoring', methods=['POST'])
@@ -661,19 +691,26 @@ def start_monitoring():
         multiple = float(request.form['multiple'])
         ema_type = request.form.get('ema_type', 'ema_7_21')
         
-        if timeframe not in timeframe_to_check_interval:
+        if timeframe not in TIMEFRAME_CONFIG:
             return "Timeframe inválido.", 400
         
         if ema_type not in EMA_CONFIGS:
             return "Tipo de EMA inválido.", 400
         
+        # Verificar se há símbolos disponíveis
+        symbols = get_trading_symbols()
+        if not symbols:
+            return "Erro: Nenhum símbolo disponível para monitoramento.", 500
+        
+        # Parar monitoramento atual
         stop_monitoring = True
         thread_id += 1
         new_thread_id = thread_id
         
-        print(f"🛑 Parando threads antigas. Nova thread: {new_thread_id}")
+        logger.info(f"🛑 Parando threads antigas. Nova thread: {new_thread_id}")
         time.sleep(1.0)
         
+        # Reiniciar monitoramento
         stop_monitoring = False
         
         monitoring_thread = threading.Thread(
@@ -683,66 +720,67 @@ def start_monitoring():
         )
         monitoring_thread.start()
         
-        print(f"✅ Thread {new_thread_id} iniciada")
+        logger.info(f"✅ Thread {new_thread_id} iniciada com sucesso")
         return f"Monitoramento iniciado - Thread {new_thread_id}", 200
         
     except Exception as e:
-        print(f"Erro ao iniciar monitoramento: {e}")
+        logger.error(f"Erro ao iniciar monitoramento: {e}")
         return f"Erro: {str(e)}", 500
 
 @app.route('/stop_monitoring', methods=['POST'])
 def stop_monitoring_route():
-    global stop_monitoring, monitoring_thread, thread_id, current_ema_type
-    
-    print("🛑 Parando monitoramento")
+    global stop_monitoring, thread_id
     stop_monitoring = True
     thread_id += 1
-    
-    monitoring_thread = None
-    current_ema_type = None
-    socketio.emit('monitoring_stopped', {'status': 'Parado'})
-    print("✅ Monitoramento parado")
-    
-    return "Monitoramento parado.", 200
+    logger.info("🛑 Monitoramento parado pelo usuário")
+    return "Monitoramento parado", 200
+
+@app.route('/alerts')
+def get_alerts():
+    """Rota para obter histórico de alertas"""
+    return jsonify(alert_history)
+
+@app.route('/stats')
+def get_stats():
+    """Rota para obter estatísticas"""
+    return jsonify(stats)
 
 @socketio.on('connect')
 def handle_connect():
-    print('Cliente conectado')
-    if current_timeframe and current_multiple:
-        emit('current_status', {
-            'monitoring': not stop_monitoring,
-            'timeframe': current_timeframe,
-            'multiple': current_multiple,
-            'ema_type': current_ema_type,
-            'ema_name': EMA_CONFIGS.get(current_ema_type, {}).get('name', '') if current_ema_type else ''
-        })
+    logger.info('✅ Cliente conectado via WebSocket')
+    emit('connection_status', {'status': 'connected'})
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print('Cliente desconectado')
+    logger.info('❌ Cliente desconectado via WebSocket')
 
-@app.route('/health')
-def health_check():
-    return {'status': 'healthy', 'symbols': len(symbols)}, 200
+@socketio.on('request_status')
+def handle_status_request():
+    """Handle de requisição de status via WebSocket"""
+    ema_name = EMA_CONFIGS.get(current_ema_type, {}).get('name', '') if current_ema_type else ''
+    symbols = get_trading_symbols()
+    
+    emit('status_update', {
+        'monitoring_active': not stop_monitoring,
+        'current_timeframe': current_timeframe,
+        'current_multiple': current_multiple,
+        'current_ema_type': current_ema_type,
+        'current_ema_name': ema_name,
+        'total_symbols': len(symbols),
+        'stats': stats
+    })
 
-# Para produção, usar Gunicorn
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
-    print(f"🚀 Iniciando Whale Detector na porta {port}...")
-    print(f"📊 Símbolos carregados: {len(symbols)}")
-    
     debug_mode = os.environ.get('FLASK_ENV', 'production') == 'development'
     
-    # Para desenvolvimento local apenas
+    # Testar carregamento de símbolos na inicialização
+    symbols = get_trading_symbols()
+    logger.info(f"🚀 Iniciando Whale Detector Pro na porta {port}")
+    logger.info(f"📊 {len(symbols)} símbolos carregados")
+    logger.info(f"🔧 Modo: {'Desenvolvimento' if debug_mode else 'Produção'}")
+    
     if debug_mode:
-        socketio.run(
-            app, 
-            debug=True, 
-            host='0.0.0.0', 
-            port=port, 
-            use_reloader=False,
-            allow_unsafe_werkzeug=True
-        )
+        socketio.run(app, debug=True, host='0.0.0.0', port=port, use_reloader=True, allow_unsafe_werkzeug=True)
     else:
-        # Em produção, usar Gunicorn
-        print("✅ Aplicação pronta para produção com Gunicorn")
+        socketio.run(app, debug=False, host='0.0.0.0', port=port, use_reloader=False)
