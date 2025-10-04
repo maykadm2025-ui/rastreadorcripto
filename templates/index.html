@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Whale Detector Pro - Binance</title>
+    <title>Rastreador de Crypto Pro - Binance</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
@@ -19,6 +19,12 @@
         }
         .gradient-bg { background: linear-gradient(135deg, #1a202c 0%, #2d3748 100%); }
         .glass-effect { background: rgba(255, 255, 255, 0.1); backdrop-filter: blur(10px); }
+        .loading-pulse { animation: pulse 1.5s infinite; }
+        @keyframes pulse { 
+            0% { opacity: 0.6; }
+            50% { opacity: 1; }
+            100% { opacity: 0.6; }
+        }
     </style>
 </head>
 <body class="gradient-bg text-white min-h-screen">
@@ -97,7 +103,7 @@
                     </div>
                     <div class="ml-4">
                         <h3 class="text-xl font-bold text-green-400">Monitoramento Ativo</h3>
-                        <p id="statusDetails" class="text-gray-300"></p>
+                        <p id="statusDetails" class="text-gray-300">Carregando...</p>
                     </div>
                 </div>
                 <div class="flex items-center space-x-6">
@@ -109,6 +115,19 @@
                         <i class="fas fa-microchip text-2xl mr-2"></i>
                         <span id="threadStatus" class="font-semibold">-</span>
                     </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Loading Message -->
+        <div id="loadingMessage" class="glass-effect rounded-xl p-8 mb-8 border border-green-500 text-center hidden">
+            <div class="flex items-center justify-center space-x-4">
+                <div class="loading-pulse text-green-400">
+                    <i class="fas fa-sync-alt fa-2x"></i>
+                </div>
+                <div>
+                    <h3 class="text-2xl font-bold text-green-400 mb-2">CARREGANDO SÍMBOLOS</h3>
+                    <p class="text-gray-300">Inicializando monitoramento e aguardando primeiros alertas...</p>
                 </div>
             </div>
         </div>
@@ -184,6 +203,26 @@
             </div>
         </div>
 
+        <!-- Alert History -->
+        <div class="glass-effect rounded-xl p-6 border border-gray-700 mt-8">
+            <div class="flex items-center justify-between mb-6">
+                <h2 class="text-2xl font-bold text-white">
+                    <i class="fas fa-history mr-2"></i>Histórico de Alertas
+                </h2>
+                <div class="flex space-x-2">
+                    <button id="showAllAlerts" class="px-4 py-2 bg-blue-600 rounded-lg text-white font-semibold hover:bg-blue-700 transition">Todos</button>
+                    <button id="showVolumeAlerts" class="px-4 py-2 bg-yellow-600 rounded-lg text-white font-semibold hover:bg-yellow-700 transition">Volume</button>
+                    <button id="showIndicatorAlerts" class="px-4 py-2 bg-green-600 rounded-lg text-white font-semibold hover:bg-green-700 transition">Indicadores</button>
+                </div>
+            </div>
+            <div id="alertHistory" class="max-h-96 overflow-y-auto space-y-3">
+                <div class="text-gray-500 text-center py-8">
+                    <i class="fas fa-clock fa-3x mb-4 opacity-50"></i>
+                    <p>Nenhum alerta no histórico</p>
+                </div>
+            </div>
+        </div>
+
         <!-- Advanced Stats -->
         <div class="glass-effect rounded-xl p-6 border border-gray-700 mt-8">
             <h2 class="text-2xl font-bold text-white mb-6">
@@ -209,27 +248,9 @@
             </div>
         </div>
 
-        <!-- Alert History -->
-        <div class="glass-effect rounded-xl p-6 border border-gray-700 mt-8">
-            <h2 class="text-2xl font-bold text-white mb-6">
-                <i class="fas fa-history mr-2"></i>Histórico de Alertas
-            </h2>
-            <div class="flex space-x-4 mb-4">
-                <button id="showAllAlerts" class="px-4 py-2 bg-blue-600 rounded-lg text-white font-semibold">Todos</button>
-                <button id="showVolumeAlerts" class="px-4 py-2 bg-yellow-600 rounded-lg text-white font-semibold">Volume</button>
-                <button id="showIndicatorAlerts" class="px-4 py-2 bg-green-600 rounded-lg text-white font-semibold">Indicadores</button>
-            </div>
-            <div id="alertHistory" class="max-h-96 overflow-y-auto space-y-3">
-                <div class="text-gray-500 text-center py-8">
-                    <i class="fas fa-clock fa-3x mb-4 opacity-50"></i>
-                    <p>Histórico de alertas aparecerá aqui</p>
-                </div>
-            </div>
-        </div>
-
         <!-- Footer -->
         <div class="text-center mt-12 text-gray-500">
-            <p>Whale Detector Pro &copy; 2024 - Monitoramento em tempo real da Binance</p>
+            <p>Mykey Pro &copy; 2025 - Monitoramento em tempo real da Binance</p>
             <p class="text-sm mt-2">Desenvolvido para análise técnica avançada e detecção de whales</p>
         </div>
     </div>
@@ -241,6 +262,8 @@
         let totalVolumeAlerts = 0;
         let totalIndicatorAlerts = 0;
         let alertHistory = [];
+        let isFirstAlert = true;
+        let currentFilter = 'all';
 
         // Elements
         const elements = {
@@ -261,7 +284,8 @@
             totalVolumeAlertsSpan: document.getElementById('totalVolumeAlerts'),
             totalIndicatorAlertsSpan: document.getElementById('totalIndicatorAlerts'),
             alertHistoryDiv: document.getElementById('alertHistory'),
-            threadStatus: document.getElementById('threadStatus')
+            threadStatus: document.getElementById('threadStatus'),
+            loadingMessage: document.getElementById('loadingMessage')
         };
 
         // Start monitoring
@@ -269,6 +293,11 @@
             const timeframe = document.getElementById('timeframe').value;
             const multiple = document.getElementById('multiple').value;
             const emaType = document.getElementById('ema_type').value;
+
+            // Clear current alerts and show loading
+            clearCurrentAlerts();
+            showLoadingMessage();
+            isFirstAlert = true;
 
             fetch('/start_monitoring', {
                 method: 'POST',
@@ -280,6 +309,7 @@
             }).catch(error => {
                 console.error('Erro:', error);
                 showNotification('Erro ao iniciar monitoramento', 'error');
+                hideLoadingMessage();
             });
         });
 
@@ -290,6 +320,7 @@
             .then(data => {
                 console.log('Parado:', data);
                 showNotification('Monitoramento parado!', 'warning');
+                hideLoadingMessage();
             })
             .catch(error => {
                 console.error('Erro:', error);
@@ -325,17 +356,27 @@
             showNotification('Monitoramento parado', 'warning');
         });
 
-        socket.on('whale_alert', (alert) => {
+        socket.on('volume_alert', (alert) => {
+            if (isFirstAlert) {
+                hideLoadingMessage();
+                isFirstAlert = false;
+            }
+            
             volumeAlertCount++;
             totalVolumeAlerts++;
             addVolumeAlert(alert);
             addToHistory(alert, 'volume');
             updateStats();
             playNotificationSound();
-            showNotification(`🚨 Volume ${alert.crypto}: ${alert.multiple}x`, 'warning');
+            showNotification(`🚨 Volume ${alert.crypto}: ${alert.volume_ratio}x`, 'warning');
         });
 
         socket.on('indicator_alert', (alert) => {
+            if (isFirstAlert) {
+                hideLoadingMessage();
+                isFirstAlert = false;
+            }
+            
             indicatorAlertCount++;
             totalIndicatorAlerts++;
             addIndicatorAlert(alert);
@@ -343,9 +384,15 @@
             updateStats();
             playNotificationSound();
             
-            let message = `📈 ${alert.type} ${alert.crypto}`;
+            let message = '';
             if (alert.type.includes('RSI')) {
                 message = `📊 RSI ${alert.crypto}: ${alert.current_rsi}`;
+            } else if (alert.type.includes('EMA')) {
+                message = `📈 ${alert.type.replace(/_/g, ' ')} ${alert.crypto}`;
+            } else if (alert.type.includes('MACD')) {
+                message = `📉 ${alert.type.replace(/_/g, ' ')} ${alert.crypto}`;
+            } else {
+                message = `📈 ${alert.type} ${alert.crypto}`;
             }
             showNotification(message, 'info');
         });
@@ -354,8 +401,8 @@
             updateAdvancedStats(data);
         });
 
-        socket.on('current_status', (data) => {
-            if (data.monitoring) {
+        socket.on('status_update', (data) => {
+            if (data.monitoring_active) {
                 showStatus(data);
                 elements.threadStatus.textContent = `Thread ${data.current_thread_id}`;
             }
@@ -364,16 +411,75 @@
         // Helper functions
         function showStatus(data) {
             elements.statusDiv.classList.remove('hidden');
+            const symbolsCount = data.total_symbols || 'Carregando...';
+            const timeframe = data.current_timeframe || 'N/A';
+            const multiple = data.current_multiple || 'N/A';
+            const emaName = data.current_ema_name || 'N/A';
+            
             elements.statusDetails.innerHTML = `
-                <strong>Timeframe:</strong> ${data.timeframe} | 
-                <strong>Múltiplo:</strong> ${data.multiple}x | 
-                <strong>EMA:</strong> ${data.ema_name} |
-                <strong>Símbolos:</strong> ${data.total_symbols}
+                <strong>Timeframe:</strong> ${timeframe} | 
+                <strong>Múltiplo:</strong> ${multiple}x | 
+                <strong>EMA:</strong> ${emaName} |
+                <strong>Símbolos:</strong> ${symbolsCount}
             `;
+            elements.totalSymbolsSpan.textContent = symbolsCount;
         }
 
         function hideStatus() {
             elements.statusDiv.classList.add('hidden');
+        }
+
+        function showLoadingMessage() {
+            elements.loadingMessage.classList.remove('hidden');
+        }
+
+        function hideLoadingMessage() {
+            elements.loadingMessage.classList.add('hidden');
+        }
+
+        function clearCurrentAlerts() {
+            // Move current alerts to history before clearing
+            const currentVolumeAlerts = Array.from(elements.volumeAlertsDiv.children)
+                .filter(el => !el.className.includes('text-gray-500'))
+                .map(el => {
+                    const crypto = el.querySelector('.font-bold')?.textContent || 'Unknown';
+                    const multiple = el.querySelector('.bg-yellow-600')?.textContent || '0x';
+                    return { type: 'volume', crypto, multiple, timestamp: new Date().toLocaleTimeString() };
+                });
+
+            const currentIndicatorAlerts = Array.from(elements.indicatorAlertsDiv.children)
+                .filter(el => !el.className.includes('text-gray-500'))
+                .map(el => {
+                    const crypto = el.querySelector('.font-bold')?.textContent || 'Unknown';
+                    const alertType = el.querySelector('.bg-green-600, .bg-red-600')?.textContent || 'Indicator';
+                    return { type: 'indicator', crypto, alertType, timestamp: new Date().toLocaleTimeString() };
+                });
+
+            // Add to history
+            currentVolumeAlerts.forEach(alert => addToHistory(alert, 'volume'));
+            currentIndicatorAlerts.forEach(alert => addToHistory(alert, 'indicator'));
+
+            // Clear current displays
+            elements.volumeAlertsDiv.innerHTML = `
+                <div class="text-gray-500 text-center py-8">
+                    <i class="fas fa-search fa-3x mb-4 opacity-50"></i>
+                    <p class="text-lg">Aguardando detecção de whales...</p>
+                    <p class="text-sm text-gray-400 mt-2">Volume anômalo será exibido aqui</p>
+                </div>
+            `;
+
+            elements.indicatorAlertsDiv.innerHTML = `
+                <div class="text-gray-500 text-center py-8">
+                    <i class="fas fa-wave-square fa-3x mb-4 opacity-50"></i>
+                    <p class="text-lg">Aguardando sinais técnicos...</p>
+                    <p class="text-sm text-gray-400 mt-2">RSI, EMA e MACD serão exibidos aqui</p>
+                </div>
+            `;
+
+            // Reset counters
+            volumeAlertCount = 0;
+            indicatorAlertCount = 0;
+            updateStats();
         }
 
         function updateConnectionStatus(connected) {
@@ -418,11 +524,10 @@
         function createAlertElement(alert, type) {
             const isVolume = type === 'volume';
             const color = alert.color || (isVolume ? 'yellow' : 
-                          alert.type.includes('GOLDEN') || alert.type.includes('BULLISH') ? 'green' : 
-                          alert.type.includes('OVERSOLD') ? 'green' : 'red');
+                          alert.type.includes('GOLDEN') || alert.type.includes('BULLISH') || alert.type.includes('OVERSOLD') ? 'green' : 'red');
             
             const alertElement = document.createElement('div');
-            alertElement.className = `alert-fade-in pulse-alert bg-${color}-900 border-l-4 border-${color}-500 p-4 rounded-lg`;
+            alertElement.className = `alert-fade-in bg-${color}-900 border-l-4 border-${color}-500 p-4 rounded-lg`;
             
             let content = '';
             
@@ -432,32 +537,37 @@
                         <div class="flex-1">
                             <div class="flex items-center mb-2">
                                 <div class="font-bold text-${color}-300 text-xl mr-3">${alert.crypto}</div>
-                                <span class="bg-${color}-600 text-white px-2 py-1 rounded text-sm font-bold">${alert.multiple}x</span>
+                                <span class="bg-${color}-600 text-white px-2 py-1 rounded text-sm font-bold">${alert.volume_ratio}x</span>
                             </div>
-                            <div class="text-${color}-200 text-sm mb-1">Volume: ${formatNumber(alert.volume)}</div>
-                            <div class="text-gray-300 text-xs">Média: ${formatNumber(alert.avg_volume)} | Preço: $${alert.price}</div>
-                            <div class="text-${alert.price_change >= 0 ? 'green' : 'red'}-400 text-xs font-bold mt-1">
-                                ${alert.price_change >= 0 ? '↗' : '↘'} ${alert.price_change}%
+                            <div class="text-${color}-200 text-sm mb-1">
+                                <strong>Volume Atual:</strong> ${alert.current_volume_formatted} | 
+                                <strong>Média:</strong> ${alert.average_volume_formatted}
+                            </div>
+                            <div class="text-gray-300 text-xs">
+                                <strong>Preço:</strong> $${alert.price} | 
+                                <span class="text-${alert.price_change >= 0 ? 'green' : 'red'}-400 font-bold">
+                                    ${alert.price_change >= 0 ? '↗' : '↘'} ${alert.price_change}%
+                                </span>
                             </div>
                         </div>
                         <div class="text-right ml-4">
-                            <div class="text-${color}-400 font-bold text-lg">${alert.multiple}x</div>
+                            <div class="text-${color}-400 font-bold text-lg">${alert.volume_ratio}x</div>
                             <div class="text-gray-400 text-xs mt-1">${alert.timestamp.split(' ')[1]}</div>
                         </div>
                     </div>
                     <div class="text-gray-400 text-xs mt-2 flex justify-between">
                         <span>${alert.timeframe_name}</span>
-                        <span>WHALE DETECTED</span>
+                        <span class="text-${color}-400">${alert.alert_description || 'WHALE DETECTED'}</span>
                     </div>
                 `;
             } else {
                 let details = '';
                 if (alert.type.includes('RSI')) {
-                    details = `RSI: ${alert.previous_rsi} → ${alert.current_rsi}`;
+                    details = `<strong>RSI:</strong> ${alert.previous_rsi} → ${alert.current_rsi}`;
                 } else if (alert.type.includes('EMA')) {
-                    details = `${alert.ema_name}`;
+                    details = `<strong>${alert.ema_name}:</strong> ${alert.ema_fast}/${alert.ema_slow}`;
                 } else if (alert.type.includes('MACD')) {
-                    details = `MACD: ${alert.macd_line?.toFixed(4) || ''}`;
+                    details = `<strong>MACD:</strong> ${alert.macd_line?.toFixed(6) || ''} | <strong>Signal:</strong> ${alert.signal_line?.toFixed(6) || ''}`;
                 }
                 
                 content = `
@@ -489,17 +599,22 @@
             alert.historyId = Date.now();
             alertHistory.unshift(alert);
             
-            if (alertHistory.length > 50) {
-                alertHistory = alertHistory.slice(0, 50);
+            if (alertHistory.length > 100) {
+                alertHistory = alertHistory.slice(0, 100);
             }
             
             updateAlertHistory();
         }
 
         function updateAlertHistory() {
-            elements.alertHistoryDiv.innerHTML = '';
-            
-            if (alertHistory.length === 0) {
+            const filteredAlerts = alertHistory.filter(alert => {
+                if (currentFilter === 'all') return true;
+                if (currentFilter === 'volume') return alert.historyType === 'volume';
+                if (currentFilter === 'indicator') return alert.historyType === 'indicator';
+                return true;
+            });
+
+            if (filteredAlerts.length === 0) {
                 elements.alertHistoryDiv.innerHTML = `
                     <div class="text-gray-500 text-center py-8">
                         <i class="fas fa-clock fa-3x mb-4 opacity-50"></i>
@@ -509,26 +624,58 @@
                 return;
             }
             
-            alertHistory.forEach(alert => {
+            elements.alertHistoryDiv.innerHTML = '';
+            
+            filteredAlerts.forEach(alert => {
                 const historyElement = document.createElement('div');
-                historyElement.className = `bg-gray-800 border-l-4 border-${alert.color}-500 p-3 rounded mb-2`;
+                const color = alert.color || (alert.historyType === 'volume' ? 'yellow' : 'blue');
                 
-                const time = alert.timestamp.split(' ')[1];
-                const type = alert.historyType === 'volume' ? '📊 Volume' : '📈 Indicador';
+                historyElement.className = `bg-gray-800 border-l-4 border-${color}-500 p-4 rounded-lg mb-3`;
+                
+                const time = alert.timestamp;
+                const typeIcon = alert.historyType === 'volume' ? '📊' : '📈';
+                const typeText = alert.historyType === 'volume' ? 'Volume' : 'Indicador';
+                
+                let details = '';
+                if (alert.historyType === 'volume') {
+                    details = `
+                        <div class="text-yellow-400 text-sm">
+                            <strong>Volume:</strong> ${alert.current_volume_formatted} | 
+                            <strong>Múltiplo:</strong> ${alert.volume_ratio}x
+                        </div>
+                        <div class="text-gray-300 text-xs">
+                            <strong>Preço:</strong> $${alert.price} | 
+                            <span class="text-${alert.price_change >= 0 ? 'green' : 'red'}-400">
+                                ${alert.price_change >= 0 ? '↗' : '↘'} ${alert.price_change}%
+                            </span>
+                        </div>
+                    `;
+                } else {
+                    if (alert.type.includes('RSI')) {
+                        details = `<div class="text-blue-400 text-sm"><strong>RSI:</strong> ${alert.current_rsi}</div>`;
+                    } else if (alert.type.includes('EMA')) {
+                        details = `<div class="text-blue-400 text-sm"><strong>${alert.ema_name}</strong></div>`;
+                    } else if (alert.type.includes('MACD')) {
+                        details = `<div class="text-blue-400 text-sm"><strong>MACD:</strong> ${alert.macd_line?.toFixed(6) || ''}</div>`;
+                    }
+                }
                 
                 historyElement.innerHTML = `
-                    <div class="flex justify-between items-center">
-                        <div>
-                            <span class="font-bold text-white">${alert.crypto}</span>
-                            <span class="text-sm text-gray-400 ml-2">${type}</span>
+                    <div class="flex justify-between items-start mb-2">
+                        <div class="flex items-center">
+                            <span class="text-2xl mr-2">${typeIcon}</span>
+                            <div>
+                                <span class="font-bold text-white text-lg">${alert.crypto}</span>
+                                <span class="text-sm text-gray-400 ml-2">${typeText}</span>
+                            </div>
                         </div>
                         <div class="text-right">
                             <div class="text-xs text-gray-400">${time}</div>
-                            <div class="text-xs text-gray-500">${alert.timeframe}</div>
+                            <div class="text-xs text-gray-500">${alert.timeframe_name}</div>
                         </div>
                     </div>
-                    ${alert.multiple ? `<div class="text-yellow-400 text-sm mt-1">${alert.multiple}x volume</div>` : ''}
-                    ${alert.current_rsi ? `<div class="text-green-400 text-sm mt-1">RSI: ${alert.current_rsi}</div>` : ''}
+                    ${details}
+                    ${alert.alert_description ? `<div class="text-gray-400 text-xs mt-2">${alert.alert_description}</div>` : ''}
                 `;
                 
                 elements.alertHistoryDiv.appendChild(historyElement);
@@ -536,14 +683,27 @@
         }
 
         function filterAlerts(filter) {
-            // Implementação simplificada - na prática você filtraria o alertHistory
-            updateAlertHistory(); // Recarrega com todos por enquanto
+            currentFilter = filter;
+            updateAlertHistory();
+            
+            // Update button styles
+            document.getElementById('showAllAlerts').classList.remove('bg-blue-700');
+            document.getElementById('showVolumeAlerts').classList.remove('bg-yellow-700');
+            document.getElementById('showIndicatorAlerts').classList.remove('bg-green-700');
+            
+            document.getElementById('showAllAlerts').classList.add('bg-blue-600');
+            document.getElementById('showVolumeAlerts').classList.add('bg-yellow-600');
+            document.getElementById('showIndicatorAlerts').classList.add('bg-green-600');
+            
+            document.getElementById(`show${filter.charAt(0).toUpperCase() + filter.slice(1)}Alerts`).classList.remove(`bg-${filter === 'all' ? 'blue' : filter === 'volume' ? 'yellow' : 'green'}-600`);
+            document.getElementById(`show${filter.charAt(0).toUpperCase() + filter.slice(1)}Alerts`).classList.add(`bg-${filter === 'all' ? 'blue' : filter === 'volume' ? 'yellow' : 'green'}-700`);
         }
 
         function formatNumber(num) {
+            if (!num) return '0';
             if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
             if (num >= 1000) return (num / 1000).toFixed(2) + 'K';
-            return num?.toFixed(2) || '0';
+            return num.toFixed(2);
         }
 
         function updateStats() {
@@ -553,15 +713,16 @@
         }
 
         function updateAdvancedStats(data) {
-            elements.totalCyclesSpan.textContent = data.cycle;
-            elements.totalProcessedSpan.textContent = data.processed;
-            elements.totalVolumeAlertsSpan.textContent = data.total_alerts.volume_alerts;
+            elements.totalCyclesSpan.textContent = data.cycle || 0;
+            elements.totalProcessedSpan.textContent = data.processed || 0;
+            elements.totalVolumeAlertsSpan.textContent = data.total_alerts?.volume_alerts || 0;
             elements.totalIndicatorAlertsSpan.textContent = 
-                data.total_alerts.rsi_alerts + data.total_alerts.ema_alerts + data.total_alerts.macd_alerts;
+                (data.total_alerts?.rsi_alerts || 0) + 
+                (data.total_alerts?.ema_alerts || 0) + 
+                (data.total_alerts?.macd_alerts || 0);
         }
 
         function playNotificationSound() {
-            // Som de notificação simples
             try {
                 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 const oscillator = audioContext.createOscillator();
@@ -584,7 +745,6 @@
         }
 
         function showNotification(message, type) {
-            // Criar notificação toast
             const toast = document.createElement('div');
             toast.className = `fixed top-4 right-4 p-4 rounded-lg shadow-lg z-50 transform translate-x-full transition-transform duration-300 ${
                 type === 'success' ? 'bg-green-600' : 
@@ -595,31 +755,32 @@
             
             document.body.appendChild(toast);
             
-            // Animar entrada
             setTimeout(() => {
                 toast.style.transform = 'translateX(0)';
             }, 100);
             
-            // Remover após 3 segundos
             setTimeout(() => {
                 toast.style.transform = 'translateX(100%)';
                 setTimeout(() => {
-                    document.body.removeChild(toast);
+                    if (document.body.contains(toast)) {
+                        document.body.removeChild(toast);
+                    }
                 }, 300);
             }, 3000);
         }
 
         // Initial setup
         updateStats();
+        filterAlerts('all');
         
         // Load initial stats
         fetch('/status')
             .then(response => response.json())
             .then(data => {
-                elements.totalSymbolsSpan.textContent = data.total_symbols;
+                elements.totalSymbolsSpan.textContent = data.total_symbols || 0;
                 if (data.monitoring_active) {
                     showStatus(data);
-                    elements.threadStatus.textContent = `Thread ${data.current_thread_id}`;
+                    elements.threadStatus.textContent = `Thread ${data.current_thread_id || '-'}`;
                 }
             })
             .catch(error => {
@@ -627,15 +788,21 @@
             });
 
         // Load alert history
-        fetch('/alert_history')
+        fetch('/alerts')
             .then(response => response.json())
             .then(data => {
-                alertHistory = data.history || [];
+                alertHistory = data.slice(0, 100).map(alert => ({
+                    ...alert,
+                    historyType: alert.type?.includes('VOLUME') ? 'volume' : 'indicator'
+                }));
                 updateAlertHistory();
             })
             .catch(error => {
                 console.error('Erro ao carregar histórico:', error);
             });
+
+        // Request current status
+        socket.emit('request_status');
     </script>
 </body>
 </html>
