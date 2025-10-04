@@ -11,6 +11,7 @@ import threading
 import requests
 import logging
 from typing import List, Dict, Tuple, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -40,7 +41,11 @@ except Exception as e:
     client = None
 
 # Dicionários para armazenar dados em tempo real
-live_klines = {}
+live_klines = {}  # Lista de candles fechados por símbolo
+current_klines = {}  # Dados do candle atual (aberto) por símbolo
+volume_history = {}  # Últimos 20 volumes de candles fechados por símbolo
+last_closed_close = {}  # Último preço de close de candle fechado por símbolo
+alerted_this_candle = {}  # Flag para evitar múltiplos alertas no mesmo candle
 live_tickers = {}
 active_websockets = []
 
@@ -233,44 +238,106 @@ class TechnicalAnalyzer:
 def on_websocket_message(ws, message):
     """Processa mensagens do WebSocket"""
     try:
-        data = json.loads(message)
+        msg = json.loads(message)
         
-        # Processar klines
-        if 'e' in data and data['e'] == 'kline':
-            symbol = data['s']
-            kline_data = data['k']
+        if 'stream' in msg and 'data' in msg:
+            stream = msg['stream']
+            data = msg['data']
             
-            if kline_data['x']:  # Candle fechado
-                kline = {
-                    'open': float(kline_data['o']),
-                    'high': float(kline_data['h']),
-                    'low': float(kline_data['l']),
-                    'close': float(kline_data['c']),
-                    'volume': float(kline_data['v']),
-                    'timestamp': kline_data['t'],
-                    'is_final': kline_data['x']
-                }
-                
-                if symbol not in live_klines:
-                    live_klines[symbol] = []
-                
-                live_klines[symbol].append(kline)
-                
-                # Manter apenas os últimos 100 candles
-                if len(live_klines[symbol]) > 100:
-                    live_klines[symbol] = live_klines[symbol][-100:]
-        
-        # Processar tickers
-        elif 'e' in data and data['e'] == '24hrTicker':
-            symbol = data['s']
+            symbol_lower = stream.split('@')[0]
+            symbol = symbol_lower.upper()
             
-            live_tickers[symbol] = {
-                'price': float(data['c']),
-                'volume': float(data['v']),
-                'price_change': float(data['p']),
-                'price_change_percent': float(data['P']),
-                'timestamp': datetime.now().timestamp()
-            }
+            if '@kline_' in stream:
+                if data['e'] == 'kline':
+                    k = data['k']
+                    
+                    # Atualizar candle atual (aberto ou fechado)
+                    current_klines[symbol] = {
+                        'open': float(k['o']),
+                        'high': float(k['h']),
+                        'low': float(k['l']),
+                        'close': float(k['c']),
+                        'volume': float(k['v']),
+                        'timestamp': k['t'],
+                        'is_final': k['x']
+                    }
+                    
+                    # Verificar alerta de volume em tempo real
+                    if symbol in volume_history and len(volume_history[symbol]) > 0:
+                        avg_volume = sum(volume_history[symbol]) / len(volume_history[symbol])
+                        current_volume = current_klines[symbol]['volume']
+                        
+                        if avg_volume > 0:
+                            volume_ratio = current_volume / avg_volume
+                            
+                            if volume_ratio >= current_multiple and not alerted_this_candle.get(symbol, False):
+                                # Calcular variação de preço baseada no último close fechado
+                                price_change = 0
+                                if symbol in last_closed_close:
+                                    previous_close = last_closed_close[symbol]
+                                    current_close = current_klines[symbol]['close']
+                                    if previous_close > 0:
+                                        price_change = ((current_close - previous_close) / previous_close) * 100
+                                
+                                volume_alert = {
+                                    'crypto': symbol.replace('USDT', ''),
+                                    'symbol': symbol,
+                                    'volume': round(current_volume, 2),
+                                    'avg_volume': round(avg_volume, 2),
+                                    'multiple': round(volume_ratio, 2),
+                                    'price': round(current_close, 6),
+                                    'price_change': round(price_change, 2),
+                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                    'timeframe': current_timeframe,
+                                    'timeframe_name': TIMEFRAME_CONFIG[current_timeframe]['name'],
+                                    'thread_id': thread_id,
+                                    'color': 'green' if price_change > 0 else 'red'
+                                }
+                                socketio.emit('whale_alert', volume_alert)
+                                add_alert_to_history(volume_alert)
+                                stats['volume_alerts'] += 1
+                                logger.info(f"🚨📊 VOLUME ALERT (LIVE): {symbol} {volume_ratio:.1f}x ({price_change:+.1f}%)")
+                                alerted_this_candle[symbol] = True
+                    
+                    # Se candle fechado, atualizar histórico
+                    if k['x']:
+                        kline = {
+                            'open': float(k['o']),
+                            'high': float(k['h']),
+                            'low': float(k['l']),
+                            'close': float(k['c']),
+                            'volume': float(k['v']),
+                            'timestamp': k['t'],
+                            'is_final': k['x']
+                        }
+                        
+                        if symbol not in live_klines:
+                            live_klines[symbol] = []
+                        
+                        live_klines[symbol].append(kline)
+                        
+                        if len(live_klines[symbol]) > 100:
+                            live_klines[symbol] = live_klines[symbol][-100:]
+                        
+                        # Atualizar histórico de volumes e reset alerta
+                        if symbol not in volume_history:
+                            volume_history[symbol] = []
+                        volume_history[symbol].append(kline['volume'])
+                        if len(volume_history[symbol]) > 20:
+                            volume_history[symbol].pop(0)
+                        
+                        alerted_this_candle[symbol] = False
+                        last_closed_close[symbol] = kline['close']
+            
+            elif '@ticker' in stream:
+                if data['e'] == '24hrTicker':
+                    live_tickers[symbol] = {
+                        'price': float(data['c']),
+                        'volume': float(data['v']),
+                        'price_change': float(data['p']),
+                        'price_change_percent': float(data['P']),
+                        'timestamp': datetime.now().timestamp()
+                    }
                 
     except Exception as e:
         logger.error(f"❌ Erro ao processar mensagem WebSocket: {e}")
@@ -288,7 +355,7 @@ def on_websocket_open(ws):
     logger.info("🔌 WebSocket conectado")
 
 def initialize_websocket_connections(symbols: List[str], timeframe: str):
-    """Inicializa conexões WebSocket para os símbolos"""
+    """Inicializa múltiplas conexões WebSocket combinadas para os símbolos, em chunks para evitar limites"""
     global active_websockets
     
     # Fechar conexões existentes
@@ -297,49 +364,42 @@ def initialize_websocket_connections(symbols: List[str], timeframe: str):
     # Converter timeframe para formato WebSocket
     ws_timeframe = convert_timeframe_to_websocket(timeframe)
     
-    # Para um número gerenciável de símbolos (evitar muitos WebSockets)
-    max_symbols = min(50, len(symbols))  # Limitar a 50 símbolos para não sobrecarregar
-    selected_symbols = symbols[:max_symbols]
+    # Tamanho do chunk: 50 símbolos por conexão (100 streams: kline + ticker)
+    chunk_size = 50
+    symbol_chunks = [symbols[i:i + chunk_size] for i in range(0, len(symbols), chunk_size)]
     
-    logger.info(f"📡 Iniciando WebSockets para {len(selected_symbols)} símbolos")
+    logger.info(f"📡 Iniciando {len(symbol_chunks)} conexões WebSocket combinadas para {len(symbols)} símbolos")
     
-    for symbol in selected_symbols:
+    for idx, chunk in enumerate(symbol_chunks):
         try:
-            # Stream para klines
-            kline_stream = f"{symbol.lower()}@kline_{ws_timeframe}"
-            kline_ws = websocket.WebSocketApp(
-                f"wss://stream.binance.com:9443/ws/{kline_stream}",
+            # Criar streams para o chunk
+            streams = [f"{symbol.lower()}@kline_{ws_timeframe}" for symbol in chunk]
+            streams += [f"{symbol.lower()}@ticker" for symbol in chunk]
+            
+            stream_path = "/".join(streams)
+            url = f"wss://stream.binance.com:9443/stream?streams={stream_path}"
+            
+            ws = websocket.WebSocketApp(
+                url,
                 on_message=on_websocket_message,
                 on_error=on_websocket_error,
                 on_close=on_websocket_close,
                 on_open=on_websocket_open
             )
             
-            # Stream para ticker
-            ticker_stream = f"{symbol.lower()}@ticker"
-            ticker_ws = websocket.WebSocketApp(
-                f"wss://stream.binance.com:9443/ws/{ticker_stream}",
-                on_message=on_websocket_message,
-                on_error=on_websocket_error,
-                on_close=on_websocket_close,
-                on_open=on_websocket_open
-            )
+            # Iniciar em thread separada
+            ws_thread = threading.Thread(target=ws.run_forever, daemon=True)
+            ws_thread.start()
             
-            # Iniciar WebSockets em threads separadas
-            kline_thread = threading.Thread(target=kline_ws.run_forever, daemon=True)
-            ticker_thread = threading.Thread(target=ticker_ws.run_forever, daemon=True)
+            active_websockets.append(ws)
             
-            kline_thread.start()
-            ticker_thread.start()
-            
-            active_websockets.extend([kline_ws, ticker_ws])
-            
-            time.sleep(0.01)  # Pequena pausa para não sobrecarregar
+            logger.info(f"✅ Conexão {idx+1}/{len(symbol_chunks)} iniciada com {len(chunk)} símbolos")
+            time.sleep(0.5)  # Pausa para evitar rate limit de conexões
             
         except Exception as e:
-            logger.error(f"❌ Erro ao iniciar WebSocket para {symbol}: {e}")
+            logger.error(f"❌ Erro ao iniciar conexão WebSocket {idx+1}: {e}")
     
-    logger.info(f"✅ {len(active_websockets)} WebSockets iniciados")
+    logger.info(f"✅ {len(active_websockets)} conexões WebSocket iniciadas")
 
 def convert_timeframe_to_websocket(timeframe: str) -> str:
     """Converte timeframe para formato WebSocket da Binance"""
@@ -373,6 +433,10 @@ def stop_websocket_connections():
         active_websockets.clear()
         live_klines.clear()
         live_tickers.clear()
+        current_klines.clear()
+        volume_history.clear()
+        last_closed_close.clear()
+        alerted_this_candle.clear()
         
         logger.info("✅ Conexões WebSocket paradas e limpas")
         
@@ -421,9 +485,20 @@ def add_alert_to_history(alert: Dict):
     if len(alert_history) > MAX_ALERT_HISTORY:
         alert_history = alert_history[:MAX_ALERT_HISTORY]
 
+def fetch_klines(symbol, timeframe):
+    try:
+        klines = client.get_klines(symbol=symbol, interval=timeframe, limit=21)
+        if len(klines) >= 20:
+            volume_history[symbol] = [float(k[5]) for k in klines[-21:-1]]
+            last_closed_close[symbol] = float(klines[-1][4])
+            alerted_this_candle[symbol] = False
+        logger.debug(f"✅ Inicializado {symbol}")
+    except Exception as e:
+        logger.debug(f"Erro ao inicializar {symbol}: {e}")
+
 def monitor_whales(timeframe: str, multiple: float, ema_type: str, my_thread_id: int):
-    """Função principal de monitoramento usando WebSockets"""
-    global stop_monitoring, current_timeframe, current_multiple, current_ema_type, thread_id, last_processed, stats, last_rsi_values
+    """Função principal de monitoramento"""
+    global stop_monitoring, current_timeframe, current_multiple, current_ema_type, thread_id, last_processed, stats, last_rsi_values, volume_history, alerted_this_candle, last_closed_close
     
     logger.info(f"🚀 THREAD {my_thread_id} INICIADA: TF={timeframe}, Múltiplo={multiple}, EMA={ema_type}")
     
@@ -450,7 +525,17 @@ def monitor_whales(timeframe: str, multiple: float, ema_type: str, my_thread_id:
         })
         return
     
-    # Inicializar WebSockets para um subconjunto de símbolos
+    # Inicializar histórico de volumes via REST para todos os símbolos de forma paralela
+    logger.info("🔧 Inicializando histórico de volumes via REST...")
+    volume_history.clear()
+    last_closed_close.clear()
+    alerted_this_candle.clear()
+    with ThreadPoolExecutor(max_workers=10) as executor:  # Reduzido para 10 workers para evitar sobrecarga no pool de conexões
+        futures = [executor.submit(fetch_klines, symbol, timeframe) for symbol in all_symbols]
+        for future in as_completed(futures):
+            pass  # Esperar todas completarem
+    
+    # Inicializar WebSockets combinados para todos
     initialize_websocket_connections(all_symbols, timeframe)
     
     stats = {
@@ -484,7 +569,7 @@ def monitor_whales(timeframe: str, multiple: float, ema_type: str, my_thread_id:
         stats['total_cycles'] = cycle_count
         
         cycle_alerts = {
-            'volume': 0,
+            'volume': 0,  # Volume agora é handled no WebSocket
             'rsi': 0,
             'ema': 0,
             'macd': 0
@@ -516,10 +601,8 @@ def monitor_whales(timeframe: str, multiple: float, ema_type: str, my_thread_id:
                 
                 # Usar dados do WebSocket se disponíveis, senão usar API REST
                 if symbol in live_klines and len(live_klines[symbol]) >= 50:
-                    # Usar dados do WebSocket
                     klines_data = live_klines[symbol]
                     closes = [k['close'] for k in klines_data]
-                    volumes = [k['volume'] for k in klines_data]
                 else:
                     # Fallback para API REST
                     try:
@@ -527,7 +610,6 @@ def monitor_whales(timeframe: str, multiple: float, ema_type: str, my_thread_id:
                         if not klines or len(klines) < 50:
                             continue
                         closes = [float(k[4]) for k in klines]
-                        volumes = [float(k[5]) for k in klines]
                     except:
                         continue
                 
@@ -561,7 +643,7 @@ def monitor_whales(timeframe: str, multiple: float, ema_type: str, my_thread_id:
                                 add_alert_to_history(rsi_alert)
                                 cycle_alerts['rsi'] += 1
                                 stats['rsi_alerts'] += 1
-                                logger.info(f"🚨📈 RSI OVERSOLD: {symbol} {previous_rsi:.1f}→{current_rsi:.1f}")
+                                logger.info(f"🚨📈 RSI OVERSOLD: {symbol} {previous_rsi:.1f}→{current_rsi:.1f}, TF={timeframe}")
                             
                             elif previous_rsi >= 70 and current_rsi < 69:
                                 rsi_alert = {
@@ -581,7 +663,7 @@ def monitor_whales(timeframe: str, multiple: float, ema_type: str, my_thread_id:
                                 add_alert_to_history(rsi_alert)
                                 cycle_alerts['rsi'] += 1
                                 stats['rsi_alerts'] += 1
-                                logger.info(f"🚨📉 RSI OVERBOUGHT: {symbol} {previous_rsi:.1f}→{current_rsi:.1f}")
+                                logger.info(f"🚨📉 RSI OVERBOUGHT: {symbol} {previous_rsi:.1f}→{current_rsi:.1f}, TF={timeframe}")
                         
                         last_rsi_values[symbol] = current_rsi
                             
@@ -616,7 +698,7 @@ def monitor_whales(timeframe: str, multiple: float, ema_type: str, my_thread_id:
                                 add_alert_to_history(ema_alert)
                                 cycle_alerts['ema'] += 1
                                 stats['ema_alerts'] += 1
-                                logger.info(f"🚨📈 EMA GOLDEN CROSS: {symbol} ({ema_config['name']})")
+                                logger.info(f"🚨📈 EMA GOLDEN CROSS: {symbol} ({ema_config['name']}) {round(ema_fast[-1], 6)}/{round(ema_slow[-1], 6)}, TF={timeframe}")
                             
                             elif (ema_fast[-2] >= ema_slow[-2] and ema_fast[-1] < ema_slow[-1]):
                                 ema_alert = {
@@ -636,7 +718,7 @@ def monitor_whales(timeframe: str, multiple: float, ema_type: str, my_thread_id:
                                 add_alert_to_history(ema_alert)
                                 cycle_alerts['ema'] += 1
                                 stats['ema_alerts'] += 1
-                                logger.info(f"🚨📉 EMA DEATH CROSS: {symbol} ({ema_config['name']})")
+                                logger.info(f"🚨📉 EMA DEATH CROSS: {symbol} ({ema_config['name']}) {round(ema_fast[-1], 6)}/{round(ema_slow[-1], 6)}, TF={timeframe}")
                                 
                 except Exception as ema_error:
                     logger.debug(f"Erro EMA {symbol}: {ema_error}")
@@ -668,7 +750,7 @@ def monitor_whales(timeframe: str, multiple: float, ema_type: str, my_thread_id:
                                 add_alert_to_history(macd_alert)
                                 cycle_alerts['macd'] += 1
                                 stats['macd_alerts'] += 1
-                                logger.info(f"🚨📈 MACD BULLISH: {symbol}")
+                                logger.info(f"🚨📈 MACD BULLISH: {symbol} MACD={round(macd_line[-1], 6)}, Signal={round(signal_line[-1], 6)}, Hist={round(histogram[-1], 6)}, TF={timeframe}")
                             
                             elif (macd_line[-2] >= signal_line[-2] and macd_line[-1] < signal_line[-1]):
                                 macd_alert = {
@@ -688,63 +770,10 @@ def monitor_whales(timeframe: str, multiple: float, ema_type: str, my_thread_id:
                                 add_alert_to_history(macd_alert)
                                 cycle_alerts['macd'] += 1
                                 stats['macd_alerts'] += 1
-                                logger.info(f"🚨📉 MACD BEARISH: {symbol}")
+                                logger.info(f"🚨📉 MACD BEARISH: {symbol} MACD={round(macd_line[-1], 6)}, Signal={round(signal_line[-1], 6)}, Hist={round(histogram[-1], 6)}, TF={timeframe}")
                                 
                 except Exception as macd_error:
                     logger.debug(f"Erro MACD {symbol}: {macd_error}")
-
-                # 4. ANÁLISE DE VOLUME
-                try:
-                    # Usar dados do WebSocket ou API REST
-                    if symbol in live_klines and len(live_klines[symbol]) >= 21:
-                        volume_data = live_klines[symbol]
-                        current_volume = volume_data[-1]['volume'] if volume_data else 0
-                        current_close = volume_data[-1]['close'] if volume_data else 0
-                        historical_volumes = [k['volume'] for k in volume_data[-21:-1]]
-                    else:
-                        # Fallback para API REST
-                        volume_klines = client.get_klines(symbol=symbol, interval=timeframe, limit=21)
-                        if not volume_klines or len(volume_klines) < 21:
-                            continue
-                        current_volume = float(volume_klines[-1][5])
-                        current_close = float(volume_klines[-1][4])
-                        historical_volumes = [float(k[5]) for k in volume_klines[-21:-1]]
-                    
-                    avg_volume = sum(historical_volumes) / len(historical_volumes) if historical_volumes else 0
-                    
-                    if avg_volume > 0:
-                        volume_ratio = current_volume / avg_volume
-                        
-                        if volume_ratio >= multiple and my_thread_id == thread_id:
-                            # Calcular variação de preço
-                            if len(volume_data) >= 2:
-                                previous_close = volume_data[-2]['close']
-                                price_change = ((current_close - previous_close) / previous_close) * 100
-                            else:
-                                price_change = 0
-                            
-                            volume_alert = {
-                                'crypto': symbol.replace('USDT', ''),
-                                'symbol': symbol,
-                                'volume': round(current_volume, 2),
-                                'avg_volume': round(avg_volume, 2),
-                                'multiple': round(volume_ratio, 2),
-                                'price': round(current_close, 6),
-                                'price_change': round(price_change, 2),
-                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                'timeframe': timeframe,
-                                'timeframe_name': timeframe_config['name'],
-                                'thread_id': my_thread_id,
-                                'color': 'green' if price_change > 0 else 'red'
-                            }
-                            socketio.emit('whale_alert', volume_alert)
-                            add_alert_to_history(volume_alert)
-                            cycle_alerts['volume'] += 1
-                            stats['volume_alerts'] += 1
-                            logger.info(f"🚨📊 VOLUME ALERT: {symbol} {volume_ratio:.1f}x ({price_change:+.1f}%)")
-                
-                except Exception as volume_error:
-                    logger.debug(f"Erro Volume {symbol}: {volume_error}")
                     
             except Exception as e:
                 logger.error(f"❌ Erro geral {symbol}: {e}")
