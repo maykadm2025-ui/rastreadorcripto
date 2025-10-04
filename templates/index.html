@@ -103,7 +103,7 @@
                     </div>
                     <div class="ml-4">
                         <h3 class="text-xl font-bold text-green-400">Monitoramento Ativo</h3>
-                        <p id="statusDetails" class="text-gray-300">Carregando...</p>
+                        <p id="statusDetails" class="text-gray-300">Carregando símbolos...</p>
                     </div>
                 </div>
                 <div class="flex items-center space-x-6">
@@ -154,6 +154,54 @@
                 <div class="text-gray-400 text-sm uppercase tracking-wider">Atualização</div>
                 <div class="text-xs text-gray-500 mt-1">Última Verificação</div>
             </div>
+        </div>
+
+        <!-- TradingView Widget -->
+        <div class="glass-effect rounded-xl p-6 border border-gray-700 mb-8">
+            <h2 class="text-2xl font-bold text-white mb-6">
+                <i class="fas fa-chart-line mr-2"></i>Gráfico em Tempo Real - BTC/USDT
+            </h2>
+            <!-- TradingView Widget BEGIN -->
+            <div class="tradingview-widget-container">
+                <div class="tradingview-widget-container__widget"></div>
+                <div class="tradingview-widget-copyright">
+                    <a href="https://www.tradingview.com/symbols/BTCUSDT/?exchange=BINANCE" rel="noopener nofollow" target="_blank">
+                        <span class="blue-text">BTCUSDT chart</span>
+                    </a>
+                    <span class="trademark"> by TradingView</span>
+                </div>
+                <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+                {
+                    "allow_symbol_change": true,
+                    "calendar": false,
+                    "details": false,
+                    "hide_side_toolbar": true,
+                    "hide_top_toolbar": false,
+                    "hide_legend": false,
+                    "hide_volume": false,
+                    "hotlist": false,
+                    "interval": "D",
+                    "locale": "en",
+                    "save_image": true,
+                    "style": "1",
+                    "symbol": "BINANCE:BTCUSDT",
+                    "theme": "dark",
+                    "timezone": "America/Sao_Paulo",
+                    "backgroundColor": "#0F0F0F",
+                    "gridColor": "rgba(242, 242, 242, 0.06)",
+                    "watchlist": [],
+                    "withdateranges": false,
+                    "compareSymbols": [],
+                    "studies": [
+                        "Volume@tv-basicstudies",
+                        "STD;DEMA"
+                    ],
+                    "width": "100%",
+                    "height": 500
+                }
+                </script>
+            </div>
+            <!-- TradingView Widget END -->
         </div>
 
         <!-- Main Content -->
@@ -567,7 +615,7 @@
                 } else if (alert.type.includes('EMA')) {
                     details = `<strong>${alert.ema_name}:</strong> ${alert.ema_fast}/${alert.ema_slow}`;
                 } else if (alert.type.includes('MACD')) {
-                    details = `<strong>MACD:</strong> ${alert.macd_line?.toFixed(6) || ''} | <strong>Signal:</strong> ${alert.signal_line?.toFixed(6) || ''}`;
+                    details = `<strong>MACD:</strong> ${alert.macd_line?.toFixed(6) || ''} | <strong>Signal:</strong> ${alert.signal_line?.toFixed(6) || ''} | <strong>Histogram:</strong> ${alert.macd_histogram?.toFixed(6) || ''}`;
                 }
                 
                 content = `
@@ -654,9 +702,19 @@
                     if (alert.type.includes('RSI')) {
                         details = `<div class="text-blue-400 text-sm"><strong>RSI:</strong> ${alert.current_rsi}</div>`;
                     } else if (alert.type.includes('EMA')) {
-                        details = `<div class="text-blue-400 text-sm"><strong>${alert.ema_name}</strong></div>`;
+                        details = `
+                            <div class="text-blue-400 text-sm">
+                                <strong>${alert.ema_name}:</strong> Fast ${alert.ema_fast} | Slow ${alert.ema_slow}
+                            </div>
+                        `;
                     } else if (alert.type.includes('MACD')) {
-                        details = `<div class="text-blue-400 text-sm"><strong>MACD:</strong> ${alert.macd_line?.toFixed(6) || ''}</div>`;
+                        details = `
+                            <div class="text-blue-400 text-sm">
+                                <strong>MACD:</strong> ${alert.macd_line?.toFixed(6) || ''} | 
+                                <strong>Signal:</strong> ${alert.signal_line?.toFixed(6) || ''} | 
+                                <strong>Histogram:</strong> ${alert.macd_histogram?.toFixed(6) || ''}
+                            </div>
+                        `;
                     }
                 }
                 
